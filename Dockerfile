@@ -31,7 +31,7 @@ COPY skills/ /usr/local/share/zerda/skills/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-WORKDIR /workspace
+WORKDIR /root/.zerda
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["serve"]

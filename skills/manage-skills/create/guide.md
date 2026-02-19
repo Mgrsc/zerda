@@ -44,12 +44,11 @@ All fields are optional. Only `description` is recommended.
 
 ## Storage Locations
 
-| Scope | Path |
-|-------|------|
-| Personal | `~/.zerda/skills/<skill-name>/SKILL.md` |
-| Project | `.claude/skills/<skill-name>/SKILL.md` |
+| Path |
+|------|
+| `<resolve_path(agent.memory_dir)>/skills/<skill-name>/SKILL.md` |
 
-When skills share the same name across levels, higher-priority locations win.
+Default location is `~/.zerda/skills/<skill-name>/SKILL.md`. If `agent.memory_dir` is customized in `zerda.toml`, use the resolved directory instead.
 
 ## Argument Substitution
 

@@ -8,7 +8,13 @@ description: |
 
 Use this skill when the user wants to add, remove, or view MCP server configurations.
 
-MCP servers are configured as `[[mcp]]` blocks in a dedicated `mcp.toml` file, located next to `zerda.toml` (typically `/workspace/mcp.toml`). If `mcp.toml` does not exist yet, create it. MCP connections are established at process startup, so config changes require a process reload to take effect.
+MCP servers are configured as `[[mcp]]` blocks in a dedicated `mcp.toml` file, located next to the active `zerda.toml`. Do not hardcode a container working directory. If `mcp.toml` does not exist yet, create it. MCP connections are established at process startup, so config changes require reload to take effect.
+
+Resolve the active `zerda.toml` in this order:
+
+1. Explicit `--config` path
+2. `$ZERDA_CONFIG`
+3. `~/.zerda/zerda.toml`
 
 ## Configuration Format
 
@@ -40,7 +46,7 @@ url = "https://example.com/mcp"
 
 ### List
 
-Read `/workspace/mcp.toml` (or check `$ZERDA_CONFIG` to find the config directory) with the `read` tool and display all `[[mcp]]` blocks to the user.
+Read `<config-dir>/mcp.toml` where `<config-dir>` is the directory of the active `zerda.toml`, then display all `[[mcp]]` blocks to the user.
 
 ### Add
 
@@ -49,18 +55,20 @@ You MUST complete these steps in order:
 1. Read `mcp.toml` with the `read` tool to get current content. If the file does not exist, start with an empty file.
 2. Use the `write` tool to write the updated `mcp.toml`, appending the new `[[mcp]]` block. Write the COMPLETE file content.
 3. Verify the file was written correctly by reading it back with the `read` tool.
-4. Only after confirming the write succeeded, call the `reload` tool to restart the process and establish the new MCP connection.
+4. Only after confirming the write succeeded, call the `reload` tool with `mode=light` to apply the new MCP connection.
 
 ### Remove
 
 1. Read `mcp.toml` with the `read` tool to get current content.
 2. Use the `write` tool to write the updated `mcp.toml` with the matching `[[mcp]]` block removed. Write the COMPLETE file content.
 3. Verify the file was written correctly by reading it back with the `read` tool.
-4. Only after confirming the write succeeded, call the `reload` tool.
+4. Only after confirming the write succeeded, call the `reload` tool with `mode=light`.
 
 ## Important
 
-- NEVER call `reload` before writing the config file. The reload tool restarts the process — if you reload without writing, nothing changes.
+- NEVER call `reload` before writing the config file. If you reload without writing, nothing changes.
+- For MCP-only changes, use `reload` with `mode=light` first. If light reload is rejected, retry with `mode=full`.
+- After calling `reload` with `mode=light`, wait for the system completion message before reporting success.
 - Validate TOML syntax: arrays use `[]`, strings use `""`, no trailing commas.
 - If `reload` returns a validation error, read the config, fix the syntax, write it again, and retry.
 - The supervisor automatically rolls back the config if the process crashes repeatedly after a config change.

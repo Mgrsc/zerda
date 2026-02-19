@@ -318,14 +318,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
     } else if let Ok(env_path) = std::env::var("ZERDA_CONFIG") {
         PathBuf::from(env_path)
     } else {
-        let local = PathBuf::from("zerda.toml");
-        if local.exists() {
-            local
-        } else {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("zerda/zerda.toml")
-        }
+        resolve_path("~/.zerda/zerda.toml")
     };
 
     let raw = std::fs::read_to_string(&config_path)

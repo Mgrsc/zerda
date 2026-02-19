@@ -2,7 +2,7 @@
 name = "filesystem"
 transport = "stdio"
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed-directory"]
 
 [[mcp]]
 name = "remote-example"

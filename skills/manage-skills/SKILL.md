@@ -26,7 +26,8 @@ A skill is a directory containing a `SKILL.md` file. To install from a GitHub re
 OWNER="owner"
 REPO="repo"
 SKILL="skill-name"
-TARGET="$HOME/.zerda/skills/$SKILL"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.zerda/skills}"
+TARGET="$SKILLS_DIR/$SKILL"
 
 mkdir -p "$TARGET"
 cd $(mktemp -d)
@@ -35,6 +36,8 @@ git sparse-checkout set "skills/$SKILL" 2>/dev/null || git sparse-checkout set "
 cp -r skills/"$SKILL"/* "$TARGET"/ 2>/dev/null || cp -r "$SKILL"/* "$TARGET"/
 cd - > /dev/null
 ```
+
+Default skill directory is `~/.zerda/skills`. If `agent.memory_dir` is customized in `zerda.toml`, set `SKILLS_DIR` to `<resolve_path(agent.memory_dir)>/skills` first.
 
 After the files are in place, call the `reload` tool with `mode=light` to activate the new skill. Wait for the system confirmation message before informing the user.
 
@@ -47,8 +50,11 @@ After the files are in place, call the `reload` tool with `mode=light` to activa
 ## Uninstall
 
 ```bash
-rm -rf ~/.zerda/skills/<skill-name>
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.zerda/skills}"
+rm -rf "$SKILLS_DIR/<skill-name>"
 ```
+
+If `agent.memory_dir` is customized, set `SKILLS_DIR` to `<resolve_path(agent.memory_dir)>/skills` first.
 
 After removing the directory, call the `reload` tool with `mode=light` to update the skill index.
 
@@ -58,7 +64,8 @@ When the user wants to create a new skill, read the comprehensive guide at [crea
 
 Skill storage locations:
 
-| Scope | Path |
-|-------|------|
-| Personal | `~/.zerda/skills/<skill-name>/SKILL.md` |
-| Project | `.claude/skills/<skill-name>/SKILL.md` |
+| Path |
+|------|
+| `<resolve_path(agent.memory_dir)>/skills/<skill-name>/SKILL.md` |
+
+Default path: `~/.zerda/skills/<skill-name>/SKILL.md`.
