@@ -1,0 +1,11 @@
+/target/
+/data/
+.env
+!.env.example
+.zerda.toml.swp
+*.swp
+*.swo
+.DS_Store
+mcp.toml
+.firecrawl/
+example-docs/

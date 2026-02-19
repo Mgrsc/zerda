@@ -1,0 +1,10 @@
+[[mcp]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+[[mcp]]
+name = "remote-example"
+transport = "streamable-http"
+url = "https://example.com/mcp"

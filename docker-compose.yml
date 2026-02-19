@@ -1,0 +1,18 @@
+services:
+  zerda:
+    image: ghcr.io/mgrsc/zerda:latest
+    pull_policy: always
+    init: true
+    hostname: e-desert
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - ZERDA_CONFIG=/root/.zerda/zerda.toml
+    volumes:
+      - zerda-data:/root/.zerda
+      - ./zerda.toml:/root/.zerda/zerda.toml:ro
+      - ./identity.md:/root/.zerda/identity.md:ro
+      # - ./mcp.toml:/root/.zerda/mcp.toml:ro
+
+volumes:
+  zerda-data:
