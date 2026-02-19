@@ -1,163 +1,97 @@
-# Full zerda configuration template with explicit defaults.
-# Notes:
-# 1) `${VAR}` values are expanded from environment variables at load time.
-# 2) MCP servers can be defined here or in sibling `mcp.toml`; both are merged.
-# 3) If `[agent.subagent]` is missing, the subagent tool falls back to `[agent.compression_model]`.
+# Full zerda configuration template
+# ${VAR} expands from environment variables at load time
+# MCP servers can be defined here or in mcp.toml; both are merged
+# subagent falls back to compression_model if not configured; neither present = no subagent tool
 
 [provider]
-# Provider backend. Required (no default): openai_chat | openai_responses | anthropic
-name = "openai_chat"
-# Required (no default)
+name = "openai_chat"                    # openai_chat | openai_responses | anthropic
 api_key = "${OPENAI_API_KEY}"
-# Default in code: "" (empty). Runtime then uses provider built-in base URL.
-# openai_* built-in: https://api.openai.com/v1
-# anthropic built-in: https://api.anthropic.com/v1
-base_url = "${OPENAI_BASE_URL}"
-# Required (no default)
+base_url = "${OPENAI_BASE_URL}"         # empty = provider built-in URL
 model = "${OPENAI_MODEL}"
-# Default in code: 1.0. Valid range: 0.0 - 2.0
-temperature = 0.7
-# Default in code: 4096
-max_tokens = 4096
-# Default in code: true. If false, image input is not passed to model.
-vision = true
+temperature = 0.7                       # 0.0 - 2.0, default 1.0
+max_tokens = 4096                       # default 4096
+vision = true                           # pass image input to model, default true
 
 [provider.extra_headers]
-# Default in code: {} (empty map)
 # "HTTP-Referer" = "https://example.com"
 # "X-Title" = "zerda"
 
 [provider.retry]
-# Default in code: 3
-max_retries = 3
-# Default in code: 2000
-base_delay_ms = 2000
-# Default in code: 30000
-max_delay_ms = 30000
-# Default in code: 10
-connect_timeout_secs = 10
-# Default in code: 120
-request_timeout_secs = 120
+max_retries = 3                         # default 3
+base_delay_ms = 2000                    # default 2000
+max_delay_ms = 30000                    # default 30000
+connect_timeout_secs = 10               # default 10
+request_timeout_secs = 120              # default 120
 
 [agent]
-# Default in code: 10
-max_iterations = 10
-# Default in code: 30
-max_history = 30
-# Default in code: 15
-compaction_keep_recent = 15
-# Default in code: 30000
-max_tool_output_chars = 30000
-# Default in code: 2000
-max_memory_tokens = 2000
-# Default in code: "identity.md"
-identity_path = "~/.zerda/identity.md"
-# Default in code: "~/.zerda"
-memory_dir = "~/.zerda"
-# Default in code: 300
-shell_timeout = 300
-# Default in code: false
-show_usage = false
-# Default in code: null (disabled)
-# max_budget_tokens = 1000000
-# Default in code: []
-confirm_tools = []
-# Default in code: 102400
-max_memory_file_size = 102400
-# Default in code: 4000
-compression_summary_max_chars = 4000
-# Default in code: 7
-session_cleanup_days = 7
-# Default in code: 12000
-compression_transcript_max_chars = 12000
-# Default in code: 4000
-stream_overflow_chars = 4000
-# Default in code: null (disabled)
-# tool_timeout = 120
-# Default in code: 32000
-max_prompt_chars = 32000
+max_iterations = 10                     # max tool calls per turn, default 10
+max_history = 30                        # trigger compression when non-system messages exceed this, default 30
+compaction_keep_recent = 15             # messages to keep after compression, default 15
+max_tool_output_chars = 30000           # truncate tool output at this length, default 30000
+max_memory_tokens = 2000                # max tokens for memory tool, default 2000
+identity_path = "~/.zerda/identity.md"  # system prompt file path, default "identity.md"
+memory_dir = "~/.zerda"                 # memory/session storage directory, default "~/.zerda"
+shell_timeout = 300                     # shell tool timeout in seconds, default 300
+show_usage = false                      # print token usage after each turn, default false
+# max_budget_tokens = 1000000           # session token budget, stop when exceeded, default unlimited
+confirm_tools = []                      # tools requiring manual approval, e.g. ["shell", "write"], default []
+max_memory_file_size = 102400           # max memory file size in bytes, default 102400
+compression_summary_max_chars = 4000    # max chars for compression summary, default 4000
+session_cleanup_days = 7                # auto-delete sessions older than N days, default 7
+compression_transcript_max_chars = 12000 # max original transcript chars kept during compression, default 12000
+stream_overflow_chars = 4000            # streaming overflow buffer chars, default 4000
+# tool_timeout = 120                    # general tool timeout in seconds, default unlimited
+max_prompt_chars = 32000                # max user input chars, default 32000
 
 [agent.compression_model]
-# Optional block. Default in code: absent (None).
-# Required fields if block exists: name, api_key, model
 name = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
-# Default in provider config if omitted inside this block: ""
 base_url = "${OPENAI_BASE_URL}"
 model = "${OPENAI_COMPRESSION_MODEL}"
-# Default in provider config if omitted inside this block: 1.0
 temperature = 0.3
-# Default in provider config if omitted inside this block: 4096
 max_tokens = 4096
-# Default in provider config if omitted inside this block: true
 vision = false
 
-# Optional dedicated model for `subagent` tool.
-# Default in code: absent (None).
-# Fallback rule: if this block is missing, subagent uses [agent.compression_model].
-# If both blocks are missing, subagent tool is not registered.
 # [agent.subagent]
-# name = "openai_chat"            # required if block exists
-# api_key = "${OPENAI_API_KEY}"   # required if block exists
-# base_url = "${OPENAI_BASE_URL}" # default if omitted: ""
-# model = "${OPENAI_SUBAGENT_MODEL}" # required if block exists
-# temperature = 0.3                # default if omitted: 1.0
-# max_tokens = 4096                # default if omitted: 4096
-# vision = false                   # default if omitted: true
+# name = "openai_chat"
+# api_key = "${OPENAI_API_KEY}"
+# base_url = "${OPENAI_BASE_URL}"
+# model = "${OPENAI_SUBAGENT_MODEL}"
+# temperature = 0.3
+# max_tokens = 4096
+# vision = false
 
-# Optional MCP definitions.
-# mcp defaults from deserializer when omitted:
-# command = null, args = [], url = null, env = {}
 # [[mcp]]
-# name = "local-mcp"          # required
-# transport = "stdio"         # required
+# name = "local-mcp"
+# transport = "stdio"
 # command = "npx"
 # args = ["-y", "@scope/server"]
 # [mcp.env]
 # API_KEY = "${MCP_API_KEY}"
-#
+
 # [[mcp]]
-# name = "remote-mcp"         # required
-# transport = "streamable-http" # required
+# name = "remote-mcp"
+# transport = "streamable-http"
 # url = "https://example.com/mcp"
 
-# Optional channels.
-# Default in code when omitted: channels = []
-# `serve` mode requires at least one configured channel.
-#
-# Telegram channel params defaults (if key omitted):
-# allowed_users = []
-# max_message_length = 4096
-# polling_timeout = 30
-# split_delay_ms = 100
-# token is required for telegram.
 # [[channels]]
 # name = "telegram"
 # token = "${TELEGRAM_BOT_TOKEN}"
-# allowed_users = ["*"]
-# max_message_length = 4096
-# polling_timeout = 30
-# split_delay_ms = 100
+# allowed_users = ["*"]                 # default []
+# max_message_length = 4096             # default 4096
+# polling_timeout = 30                  # default 30
+# split_delay_ms = 100                  # default 100
 
 [tts]
-# Default in code: "" (disabled)
-provider = ""
-# Default in code: null
-# api_key = "${MINIMAX_API_KEY}"
-# Default in code: "speech-2.8-hd"
-# model = "speech-2.8-hd"
-# Default in code: null
-# voice_id = "female-shaonv"
+provider = "minimax"                    # only "minimax" supported, empty = disabled
+api_key = "${MINIMAX_API_KEY}"
+model = "speech-2.8-hd"                # default "speech-2.8-hd"
+voice_id = "female-shaonv"
 
 [stt]
-# Default in code: "" (disabled)
-provider = ""
-# Default in code: null
-# api_key = "${GROQ_API_KEY}"
-# Default in code: "whisper-large-v3-turbo"
-# model = "whisper-large-v3-turbo"
+provider = "groq"                       # only "groq" supported, empty = disabled
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"        # default "whisper-large-v3-turbo"
 
 [log]
-# Default in code: "info"
-# trace | debug | info | warn | error
-level = "info"
+level = "info"                          # trace | debug | info | warn | error, default "info"
