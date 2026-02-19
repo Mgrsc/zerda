@@ -1,83 +1,9 @@
 [provider]
 name = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"
 model = "${OPENAI_MODEL}"
-temperature = 0.7
-max_tokens = 4096
-vision = true
-
-[provider.extra_headers]
-# "HTTP-Referer" = "https://example.com"
-# "X-Title" = "zerda"
-
-[provider.retry]
-max_retries = 3
-base_delay_ms = 2000
-max_delay_ms = 30000
-connect_timeout_secs = 10
-request_timeout_secs = 120
-
-[agent]
-max_iterations = 10
-max_history = 30
-compaction_keep_recent = 15
-max_tool_output_chars = 30000
-max_memory_tokens = 2000
-identity_path = "~/.zerda/identity.md"
-memory_dir = "~/.zerda"
-shell_timeout = 300
-show_usage = false
-# max_budget_tokens = 1000000
-confirm_tools = []
-max_memory_file_size = 102400
-compression_summary_max_chars = 4000
-session_cleanup_days = 7
-compression_transcript_max_chars = 12000
-stream_overflow_chars = 4000
-# tool_timeout = 120
-max_prompt_chars = 32000
 
 [agent.compression_model]
 name = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"
 model = "${OPENAI_COMPRESSION_MODEL}"
-
-# [agent.subagent]
-# name = "openai_chat"
-# api_key = "${OPENAI_API_KEY}"
-# base_url = "${OPENAI_BASE_URL}"
-# model = "gpt-4.1-nano"
-# temperature = 0.3
-# max_tokens = 4096
-
-# mcp servers can be managed here or in sibling mcp.toml
-# [[mcp]]
-# name = "fetch"
-# transport = "streamable-http"
-# url = "https://example.com/mcp"
-
-# [[channels]]
-# name = "telegram"
-# token = "${TELEGRAM_BOT_TOKEN}"
-# allowed_users = []
-# max_message_length = 4096
-# polling_timeout = 30
-# split_delay_ms = 100
-
-[tts]
-provider = ""
-# provider = "minimax"
-# api_key = "${MINIMAX_API_KEY}"
-# model = "speech-2.8-hd"
-# voice_id = "female-shaonv"
-
-[stt]
-provider = ""
-# provider = "groq"
-# api_key = "${GROQ_API_KEY}"
-# model = "whisper-large-v3-turbo"
-
-[log]
-level = "info"
