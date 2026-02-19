@@ -10,9 +10,9 @@ services:
       - ZERDA_CONFIG=/root/.zerda/zerda.toml
     volumes:
       - zerda-data:/root/.zerda
-      - ./zerda.toml:/root/.zerda/zerda.toml:ro
-      - ./identity.md:/root/.zerda/identity.md:ro
-      # - ./mcp.toml:/root/.zerda/mcp.toml:ro
+      - ./zerda.toml:/root/.zerda/zerda.toml
+      - ./identity.md:/root/.zerda/identity.md
+      # - ./mcp.toml:/root/.zerda/mcp.toml
 
 volumes:
   zerda-data:
