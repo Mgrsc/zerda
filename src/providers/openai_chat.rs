@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use super::{
     build_openai_content_parts, sse_stream, truncate_for_log, ChatOptions, ConversationMessage,
-    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ToolCall, ToolSpec,
-    Usage,
+    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock,
+    ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -64,6 +64,9 @@ impl OpenAiChatProvider {
                         "role": "assistant",
                         "content": msg.text_content()
                     });
+                    if let Some(reasoning_content) = &msg.reasoning_content {
+                        message["reasoning_content"] = json!(reasoning_content);
+                    }
                     if !msg.tool_calls.is_empty() {
                         let tool_calls: Vec<Value> = msg
                             .tool_calls
@@ -142,6 +145,10 @@ impl OpenAiChatProvider {
             .get("content")
             .and_then(|c| c.as_str())
             .map(std::string::ToString::to_string);
+        let reasoning_content = message
+            .get("reasoning_content")
+            .and_then(|c| c.as_str())
+            .map(std::string::ToString::to_string);
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         if let Some(tcs) = message.get("tool_calls").and_then(|t| t.as_array()) {
@@ -192,6 +199,8 @@ impl OpenAiChatProvider {
             text,
             tool_calls,
             usage,
+            reasoning_content,
+            thinking_blocks: Vec::<ThinkingBlock>::new(),
         })
     }
 }
@@ -299,6 +308,18 @@ fn parse_openai_chat_sse(
     if let Some(content) = delta.get("content").and_then(Value::as_str) {
         if !content.is_empty() {
             events.push(Ok(StreamEvent::TextDelta(content.to_string())));
+        }
+    }
+    if let Some(reasoning) = delta
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .or_else(|| delta.get("reasoning").and_then(Value::as_str))
+    {
+        if !reasoning.is_empty() {
+            events.push(Ok(StreamEvent::AssistantMeta(json!({
+                "kind": "openai_reasoning_content_delta",
+                "delta": reasoning
+            }))));
         }
     }
 

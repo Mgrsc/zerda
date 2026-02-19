@@ -11,7 +11,7 @@ use crate::config::AgentConfig;
 use crate::logging::Redacted;
 use crate::providers::{
     create_provider, ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent,
-    ToolCall, ToolSpec, Usage,
+    ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::tools::{Tool, ToolResult};
 use crate::util::fs::atomic_write_text;
@@ -21,6 +21,8 @@ pub type ConfirmFn = dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync;
 
 struct TurnOutput {
     text: Option<String>,
+    reasoning_content: Option<String>,
+    thinking_blocks: Vec<ThinkingBlock>,
     tool_calls: Vec<ToolCall>,
     usage: Usage,
     parse_errors: Vec<(String, String)>,
@@ -141,6 +143,8 @@ impl Agent {
                     let response = provider.chat(&self.history, &tool_specs, opts).await?;
                     TurnOutput {
                         text: response.text,
+                        reasoning_content: response.reasoning_content,
+                        thinking_blocks: response.thinking_blocks,
                         tool_calls: response.tool_calls,
                         usage: response.usage.unwrap_or_default(),
                         parse_errors: Vec::new(),
@@ -157,8 +161,17 @@ impl Agent {
 
             if output.tool_calls.is_empty() && output.parse_errors.is_empty() {
                 let text = output.text.unwrap_or_default();
-                self.history
-                    .push(ConversationMessage::assistant(text.clone()));
+                self.history.push(ConversationMessage {
+                    role: Role::Assistant,
+                    content: if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![ContentPart::Text(text.clone())]
+                    },
+                    tool_calls: Vec::new(),
+                    reasoning_content: output.reasoning_content,
+                    thinking_blocks: output.thinking_blocks,
+                });
                 return Ok(text);
             }
 
@@ -174,6 +187,8 @@ impl Agent {
 
             let TurnOutput {
                 text,
+                reasoning_content,
+                thinking_blocks,
                 tool_calls,
                 parse_errors,
                 ..
@@ -192,6 +207,8 @@ impl Agent {
                 role: Role::Assistant,
                 content: Vec::new(),
                 tool_calls: msg_tool_calls,
+                reasoning_content,
+                thinking_blocks,
             };
             if let Some(ref text) = text {
                 if !text.is_empty() {
@@ -226,6 +243,8 @@ impl Agent {
             .await?;
 
         let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
         let mut tool_starts: Vec<(String, String)> = Vec::new();
         let mut tool_args: HashMap<String, String> = HashMap::new();
         let mut usage = Usage::default();
@@ -242,6 +261,28 @@ impl Agent {
                 }
                 StreamEvent::ToolCallDelta { id, args_chunk } => {
                     tool_args.entry(id).or_default().push_str(&args_chunk);
+                }
+                StreamEvent::AssistantMeta(meta) => {
+                    let kind = meta.get("kind").and_then(serde_json::Value::as_str);
+                    match kind {
+                        Some("openai_reasoning_content_delta") => {
+                            if let Some(delta) = meta.get("delta").and_then(serde_json::Value::as_str)
+                            {
+                                reasoning_buf.push_str(delta);
+                            }
+                        }
+                        Some("anthropic_thinking_block") => {
+                            if let Some(block) = meta.get("block") {
+                                match serde_json::from_value::<ThinkingBlock>(block.clone()) {
+                                    Ok(tb) => thinking_blocks.push(tb),
+                                    Err(e) => {
+                                        tracing::warn!("Failed to parse thinking block from stream metadata: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 StreamEvent::Done(u) => {
                     usage = u;
@@ -271,9 +312,16 @@ impl Agent {
         } else {
             Some(text_buf)
         };
+        let reasoning_content = if reasoning_buf.is_empty() {
+            None
+        } else {
+            Some(reasoning_buf)
+        };
 
         Ok(TurnOutput {
             text,
+            reasoning_content,
+            thinking_blocks,
             tool_calls,
             usage,
             parse_errors,

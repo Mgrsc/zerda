@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use super::{
     build_openai_content_parts, sse_stream, truncate_for_log, ChatOptions, ConversationMessage,
-    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ToolCall, ToolSpec,
-    Usage,
+    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock,
+    ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -195,6 +195,8 @@ impl OpenAiResponsesProvider {
             text,
             tool_calls,
             usage,
+            reasoning_content: None,
+            thinking_blocks: Vec::<ThinkingBlock>::new(),
         })
     }
 }

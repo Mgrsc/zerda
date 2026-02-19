@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::{
     sse_stream, truncate_for_log, ChatOptions, ContentPart, ConversationMessage, HttpClient,
-    Provider, ProviderResponse, Role, StreamEvent, StreamResult, ToolCall, ToolSpec, Usage,
+    Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock, ToolCall,
+    ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -41,7 +44,8 @@ impl AnthropicProvider {
                     }));
                 }
                 Role::Assistant => {
-                    let mut content: Vec<Value> = Vec::new();
+                    let mut content: Vec<Value> =
+                        msg.thinking_blocks.iter().map(|b| json!(b)).collect();
                     let text = msg.text_content();
                     if !text.is_empty() {
                         content.push(json!({ "type": "text", "text": text }));
@@ -162,10 +166,35 @@ impl AnthropicProvider {
     fn parse_response(body: &Value) -> ProviderResponse {
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
 
         if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
             for block in content {
                 match block.get("type").and_then(|t| t.as_str()) {
+                    Some("thinking") => {
+                        let thinking = block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let signature = block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(std::string::ToString::to_string);
+                        if !thinking.is_empty() || signature.is_some() {
+                            thinking_blocks.push(ThinkingBlock::Thinking { thinking, signature });
+                        }
+                    }
+                    Some("redacted_thinking") => {
+                        let data = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        if !data.is_empty() {
+                            thinking_blocks.push(ThinkingBlock::RedactedThinking { data });
+                        }
+                    }
                     Some("text") => {
                         if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                             text_parts.push(t.to_string());
@@ -221,6 +250,8 @@ impl AnthropicProvider {
             text,
             tool_calls,
             usage,
+            reasoning_content: None,
+            thinking_blocks,
         }
     }
 }
@@ -270,21 +301,36 @@ impl Provider for AnthropicProvider {
 
         Ok(sse_stream(
             resp.bytes_stream(),
-            (String::new(), 0u64),
-            |block, (current_tool_id, accumulated_input_tokens)| {
-                parse_sse_event(block, current_tool_id, accumulated_input_tokens)
-                    .into_iter()
-                    .collect()
-            },
+            AnthropicStreamState::default(),
+            parse_sse_event,
         ))
     }
 }
 
+#[derive(Default)]
+struct AnthropicStreamState {
+    current_tool_id: String,
+    accumulated_input_tokens: u64,
+    pending_thinking: HashMap<usize, PendingThinkingBlock>,
+}
+
+#[derive(Default)]
+struct PendingThinkingBlock {
+    kind: Option<PendingThinkingKind>,
+    thinking: String,
+    signature: Option<String>,
+    data: String,
+}
+
+enum PendingThinkingKind {
+    Thinking,
+    RedactedThinking,
+}
+
 fn parse_sse_event(
     block: &str,
-    current_tool_id: &mut String,
-    accumulated_input_tokens: &mut u64,
-) -> Option<Result<StreamEvent>> {
+    state: &mut AnthropicStreamState,
+) -> Vec<Result<StreamEvent>> {
     let mut event_type = "";
     let mut data_str = String::new();
 
@@ -297,16 +343,16 @@ fn parse_sse_event(
     }
 
     if data_str.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let data: Value = match serde_json::from_str(&data_str) {
         Ok(v) => v,
         Err(e) => {
-            return Some(Err(anyhow::anyhow!(
+            return vec![Err(anyhow::anyhow!(
                 "Anthropic SSE JSON parse error: {e}. raw={}",
                 truncate_for_log(&data_str, 500)
-            )));
+            ))];
         }
     };
 
@@ -318,38 +364,142 @@ fn parse_sse_event(
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(Value::as_u64)
             {
-                *accumulated_input_tokens = input;
+                state.accumulated_input_tokens = input;
             }
-            None
+            Vec::new()
         }
         "content_block_start" => {
-            let cb = data.get("content_block")?;
-            match cb.get("type")?.as_str()? {
+            let Some(cb) = data.get("content_block") else {
+                return Vec::new();
+            };
+            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+                return Vec::new();
+            };
+            let Some(block_type) = cb.get("type").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            match block_type {
                 "tool_use" => {
-                    let id = cb.get("id")?.as_str()?.to_string();
-                    let name = cb.get("name")?.as_str()?.to_string();
-                    current_tool_id.clone_from(&id);
+                    let Some(id) = cb.get("id").and_then(Value::as_str) else {
+                        return Vec::new();
+                    };
+                    let Some(name) = cb.get("name").and_then(Value::as_str) else {
+                        return Vec::new();
+                    };
+                    let id = id.to_string();
+                    let name = name.to_string();
+                    state.current_tool_id.clone_from(&id);
                     tracing::info!("Anthropic tool call start: {name}");
-                    Some(Ok(StreamEvent::ToolCallStart { id, name }))
+                    vec![Ok(StreamEvent::ToolCallStart { id, name })]
                 }
-                _ => None,
+                "thinking" => {
+                    let pending = state.pending_thinking.entry(index).or_default();
+                    pending.kind = Some(PendingThinkingKind::Thinking);
+                    if let Some(thinking) = cb.get("thinking").and_then(Value::as_str) {
+                        pending.thinking.push_str(thinking);
+                    }
+                    if let Some(signature) = cb.get("signature").and_then(Value::as_str) {
+                        pending.signature = Some(signature.to_string());
+                    }
+                    Vec::new()
+                }
+                "redacted_thinking" => {
+                    let pending = state.pending_thinking.entry(index).or_default();
+                    pending.kind = Some(PendingThinkingKind::RedactedThinking);
+                    if let Some(data) = cb.get("data").and_then(Value::as_str) {
+                        pending.data.push_str(data);
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
             }
         }
         "content_block_delta" => {
-            let delta = data.get("delta")?;
-            match delta.get("type")?.as_str()? {
+            let Some(delta) = data.get("delta") else {
+                return Vec::new();
+            };
+            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+                return Vec::new();
+            };
+            let Some(delta_type) = delta.get("type").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            match delta_type {
                 "text_delta" => {
-                    let text = delta.get("text")?.as_str()?.to_string();
-                    Some(Ok(StreamEvent::TextDelta(text)))
+                    let Some(text) = delta.get("text").and_then(Value::as_str) else {
+                        return Vec::new();
+                    };
+                    vec![Ok(StreamEvent::TextDelta(text.to_string()))]
                 }
                 "input_json_delta" => {
-                    let chunk = delta.get("partial_json")?.as_str()?.to_string();
-                    Some(Ok(StreamEvent::ToolCallDelta {
-                        id: current_tool_id.clone(),
-                        args_chunk: chunk,
-                    }))
+                    let Some(chunk) = delta.get("partial_json").and_then(Value::as_str) else {
+                        return Vec::new();
+                    };
+                    vec![Ok(StreamEvent::ToolCallDelta {
+                        id: state.current_tool_id.clone(),
+                        args_chunk: chunk.to_string(),
+                    })]
                 }
-                _ => None,
+                "thinking_delta" => {
+                    if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                        let pending = state.pending_thinking.entry(index).or_default();
+                        if pending.kind.is_none() {
+                            pending.kind = Some(PendingThinkingKind::Thinking);
+                        }
+                        pending.thinking.push_str(thinking);
+                    }
+                    Vec::new()
+                }
+                "signature_delta" => {
+                    if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                        let pending = state.pending_thinking.entry(index).or_default();
+                        pending.signature = Some(signature.to_string());
+                    }
+                    Vec::new()
+                }
+                "redacted_thinking_delta" => {
+                    if let Some(chunk) = delta.get("data").and_then(Value::as_str) {
+                        let pending = state.pending_thinking.entry(index).or_default();
+                        if pending.kind.is_none() {
+                            pending.kind = Some(PendingThinkingKind::RedactedThinking);
+                        }
+                        pending.data.push_str(chunk);
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            }
+        }
+        "content_block_stop" => {
+            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+                return Vec::new();
+            };
+            let Some(pending) = state.pending_thinking.remove(&index) else {
+                return Vec::new();
+            };
+            let PendingThinkingBlock {
+                kind,
+                thinking,
+                signature,
+                data,
+            } = pending;
+            let block = match kind {
+                Some(PendingThinkingKind::Thinking) => Some(ThinkingBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
+                Some(PendingThinkingKind::RedactedThinking) => {
+                    Some(ThinkingBlock::RedactedThinking { data })
+                }
+                None => None,
+            };
+            if let Some(block) = block {
+                vec![Ok(StreamEvent::AssistantMeta(json!({
+                    "kind": "anthropic_thinking_block",
+                    "block": block
+                })))]
+            } else {
+                Vec::new()
             }
         }
         "message_delta" => {
@@ -359,7 +509,7 @@ fn parse_sse_event(
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let usage = Usage {
-                input_tokens: *accumulated_input_tokens,
+                input_tokens: state.accumulated_input_tokens,
                 output_tokens,
             };
             tracing::info!(
@@ -367,8 +517,8 @@ fn parse_sse_event(
                 usage.input_tokens,
                 usage.output_tokens
             );
-            Some(Ok(StreamEvent::Done(usage)))
+            vec![Ok(StreamEvent::Done(usage))]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }

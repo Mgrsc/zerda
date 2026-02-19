@@ -40,6 +40,10 @@ pub struct ConversationMessage {
     pub content: Vec<ContentPart>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub thinking_blocks: Vec<ThinkingBlock>,
 }
 
 impl ConversationMessage {
@@ -48,6 +52,8 @@ impl ConversationMessage {
             role: Role::System,
             content: vec![ContentPart::Text(text.into())],
             tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -56,6 +62,8 @@ impl ConversationMessage {
             role: Role::User,
             content: vec![ContentPart::Text(text.into())],
             tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -64,14 +72,8 @@ impl ConversationMessage {
             role: Role::User,
             content: parts,
             tool_calls: Vec::new(),
-        }
-    }
-
-    pub fn assistant(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: vec![ContentPart::Text(text.into())],
-            tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -87,6 +89,8 @@ impl ConversationMessage {
             },
             content: vec![ContentPart::Text(text.into())],
             tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -114,6 +118,19 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingBlock {
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -199,6 +216,8 @@ pub struct ProviderResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    pub reasoning_content: Option<String>,
+    pub thinking_blocks: Vec<ThinkingBlock>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +225,7 @@ pub enum StreamEvent {
     TextDelta(String),
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, args_chunk: String },
+    AssistantMeta(Value),
     Done(Usage),
 }
 
@@ -297,11 +317,30 @@ pub trait Provider: Send + Sync {
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
         let response = self.chat(messages, tools, opts).await?;
+        let ProviderResponse {
+            text,
+            tool_calls,
+            usage,
+            reasoning_content,
+            thinking_blocks,
+        } = response;
         let mut events: Vec<Result<StreamEvent>> = Vec::new();
-        if let Some(text) = response.text {
+        if let Some(text) = text {
             events.push(Ok(StreamEvent::TextDelta(text)));
         }
-        for tc in &response.tool_calls {
+        if let Some(reasoning_content) = reasoning_content {
+            events.push(Ok(StreamEvent::AssistantMeta(serde_json::json!({
+                "kind": "openai_reasoning_content_delta",
+                "delta": reasoning_content
+            }))));
+        }
+        for block in thinking_blocks {
+            events.push(Ok(StreamEvent::AssistantMeta(serde_json::json!({
+                "kind": "anthropic_thinking_block",
+                "block": block
+            }))));
+        }
+        for tc in &tool_calls {
             events.push(Ok(StreamEvent::ToolCallStart {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
@@ -311,7 +350,7 @@ pub trait Provider: Send + Sync {
                 args_chunk: tc.arguments.to_string(),
             }));
         }
-        events.push(Ok(StreamEvent::Done(response.usage.unwrap_or_default())));
+        events.push(Ok(StreamEvent::Done(usage.unwrap_or_default())));
         Ok(Box::pin(futures::stream::iter(events)))
     }
 }

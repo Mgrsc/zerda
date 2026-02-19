@@ -118,6 +118,8 @@ impl Tool for SubAgentTool {
                 role: Role::Assistant,
                 content: Vec::new(),
                 tool_calls: response.tool_calls.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                thinking_blocks: response.thinking_blocks.clone(),
             };
             if let Some(ref text) = response.text {
                 if !text.is_empty() {
