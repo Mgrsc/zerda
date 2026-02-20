@@ -91,9 +91,32 @@ Zerda 采用灵活的 TOML 格式进行配置，并支持通过 `${VAR}` 语法�
 ### 📦 配置文件
 - **[`zerda.toml`](zerda.toml)**：最小化配置模板，仅包含运行所需的最核心参数，适合快速上手。
 - **[`zerda.toml.full`](zerda.toml.full)**：完整配置示例，包含所有可选参数、详细注释及进阶功能（如 TTS、STT、日志等级等）。
+- **`mcp.toml`（可选）**：如果存在，必须与当前生效的 `zerda.toml` 位于同一目录；启动时会合并其中的 `[[mcp]]` 配置。
+
+### 🧭 配置解析优先级
+Zerda 启动时按以下顺序确定配置文件：
+1. `--config` / `-c`
+2. 环境变量 `ZERDA_CONFIG`
+3. `~/.zerda/zerda.toml`
 
 ### 🔑 环境变量
-强烈建议使用 `.env` 文件来安全地管理 API 密钥等敏感信息。参考模板：[`.env.example`](.env.example)。
+Zerda 会从进程环境变量中展开 TOML 内的 `${VAR}` 占位符。
+
+- Docker 模式：`docker compose` 通过 `env_file` 自动加载 `.env`。
+- 手动启动：Zerda 不会自动读取 `.env`，需要先在 shell 中加载。
+
+```bash
+set -a
+source ~/.zerda/.env
+set +a
+./target/release/zerda --config ~/.zerda/zerda.toml
+```
+
+手动启动推荐目录结构：
+- `~/.zerda/zerda.toml`
+- `~/.zerda/mcp.toml`（可选）
+- `~/.zerda/identity.md`
+- `~/.zerda/.env`
 
 ---
 

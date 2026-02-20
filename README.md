@@ -91,9 +91,32 @@ Zerda utilizes a flexible TOML configuration format and supports `${VAR}` enviro
 ### 📦 Configuration Files
 - **[`zerda.toml`](zerda.toml)**: A minimal configuration containing only the essential parameters for a quick start.
 - **[`zerda.toml.full`](zerda.toml.full)**: A comprehensive configuration example including all optional parameters, detailed comments, and advanced settings (TTS, STT, log levels, etc.).
+- **`mcp.toml` (optional)**: If present, it must be in the same directory as the active `zerda.toml`, and its `[[mcp]]` entries are merged at startup.
+
+### 🧭 Config Resolution Order
+When Zerda starts, config is resolved in this order:
+1. `--config` / `-c`
+2. `ZERDA_CONFIG` environment variable
+3. `~/.zerda/zerda.toml`
 
 ### 🔑 Environment Variables
-We highly recommend using a `.env` file to manage sensitive information securely. See [`.env.example`](.env.example) for a template.
+Zerda expands `${VAR}` values in TOML from process environment variables.
+
+- Docker mode: `docker compose` loads `.env` automatically via `env_file`.
+- Manual mode: Zerda does not auto-load `.env`. You need to load it in your shell first.
+
+```bash
+set -a
+source ~/.zerda/.env
+set +a
+./target/release/zerda --config ~/.zerda/zerda.toml
+```
+
+Recommended manual layout:
+- `~/.zerda/zerda.toml`
+- `~/.zerda/mcp.toml` (optional)
+- `~/.zerda/identity.md`
+- `~/.zerda/.env`
 
 ---
 
