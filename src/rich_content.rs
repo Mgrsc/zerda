@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 static RICH_CONTENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<(image)>(https?://[^<]+)</image>|<(voice)>(/[^<]+)</voice>")
+    Regex::new(r"<(image)>((?:https?://|/)[^<]+)</image>|<(voice)>(/[^<]+)</voice>")
         .expect("invalid regex")
 });
 
@@ -32,8 +32,8 @@ pub fn extract_rich_segments(message: &str) -> Vec<RichSegment> {
             segments.push(RichSegment::Text(before.to_string()));
         }
 
-        if let Some(url) = caps.get(2) {
-            segments.push(RichSegment::Image(url.as_str().trim().to_string()));
+        if let Some(source) = caps.get(2) {
+            segments.push(RichSegment::Image(source.as_str().trim().to_string()));
         } else if let Some(path) = caps.get(4) {
             segments.push(RichSegment::Voice(path.as_str().trim().to_string()));
         }

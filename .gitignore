@@ -9,3 +9,5 @@
 mcp.toml
 .firecrawl/
 example-docs/
+docker-compose.test.yml
+zerda.test.toml

@@ -806,7 +806,7 @@ impl Channel for TelegramChannel {
     fn prompt_supplement(&self) -> Option<String> {
         Some(
             "You are responding via Telegram. Rich content markers:\n\
-             - <image>URL</image> — Send an image by URL\n\
+             - <image>URL_OR_ABSOLUTE_PATH</image> — Send an image by URL or absolute file path\n\
              - <voice>PATH</voice> — Send a voice message from a file path\n\
              Response format contract:\n\
              1. Put the conclusion in the first line.\n\
