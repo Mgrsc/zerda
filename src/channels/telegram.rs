@@ -12,41 +12,447 @@ use crate::stt::SttProvider;
 
 fn split_message(message: &str, max_len: usize) -> Vec<String> {
     let max_len = max_len.max(1);
-    if message.chars().count() <= max_len {
+    if message.is_empty() {
         return vec![message.to_string()];
     }
-
     let mut chunks = Vec::new();
     let mut remaining = message;
 
     while !remaining.is_empty() {
-        if remaining.chars().count() <= max_len {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
         let mut split_byte = remaining.len();
+        let mut found_limit = false;
         let mut char_count = 0usize;
         for (idx, ch) in remaining.char_indices() {
             char_count += 1;
-            if char_count >= max_len {
+            if char_count == max_len {
                 split_byte = idx + ch.len_utf8();
+                found_limit = true;
                 break;
             }
         }
 
+        if !found_limit {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
         let window = &remaining[..split_byte];
-        let split_at = window
-            .rfind('\n')
-            .map(|p| p + 1)
-            .or_else(|| window.rfind(' ').map(|p| p + 1))
-            .unwrap_or(split_byte);
+        let split_at = find_markdown_safe_split(window).unwrap_or(split_byte);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = &remaining[split_at..];
     }
 
     chunks
+}
+
+fn find_markdown_safe_split(window: &str) -> Option<usize> {
+    let mut last_split = None;
+    let mut escaped = false;
+    let mut in_link_title = false;
+    let mut pending_link_url = false;
+    let mut link_url_depth = 0usize;
+    let mut in_code_block = false;
+    let mut backtick_run = 0usize;
+
+    for (idx, ch) in window.char_indices() {
+        if ch == '`' {
+            backtick_run += 1;
+            if backtick_run == 3 {
+                in_code_block = !in_code_block;
+                backtick_run = 0;
+            }
+            continue;
+        } else {
+            backtick_run = 0;
+        }
+
+        if in_code_block {
+            continue;
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if link_url_depth > 0 {
+            if ch == '(' {
+                link_url_depth += 1;
+            } else if ch == ')' {
+                link_url_depth -= 1;
+            }
+        } else if in_link_title {
+            if ch == ']' {
+                in_link_title = false;
+                pending_link_url = true;
+            }
+        } else {
+            if pending_link_url {
+                if ch == '(' {
+                    link_url_depth = 1;
+                    pending_link_url = false;
+                    continue;
+                }
+                pending_link_url = false;
+            }
+            if ch == '[' {
+                in_link_title = true;
+                continue;
+            }
+            if ch == '\n' || ch == ' ' {
+                last_split = Some(idx + ch.len_utf8());
+            }
+        }
+    }
+
+    last_split.filter(|&p| p > 0)
+}
+
+fn normalize_telegram_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with("```") {
+            let after_open = &rest[3..];
+            if let Some(close_offset) = find_closing_code_fence(after_open) {
+                out.push_str(&rest[..3 + close_offset + 3]);
+                i += 3 + close_offset + 3;
+                continue;
+            }
+        }
+        if rest.starts_with('`') {
+            let after_tick = &rest[1..];
+            if let Some(close_offset) = after_tick.find('`') {
+                out.push_str(&rest[..2 + close_offset]);
+                i += 2 + close_offset;
+                continue;
+            }
+        }
+        if rest.starts_with("**") {
+            out.push('*');
+            i += 2;
+            continue;
+        }
+        if let Some(ch) = rest.chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn escape_markdown_v2_char(ch: char, out: &mut String) {
+    if matches!(
+        ch,
+        '\\'
+            | '_'
+            | '*'
+            | '['
+            | ']'
+            | '('
+            | ')'
+            | '~'
+            | '`'
+            | '>'
+            | '#'
+            | '+'
+            | '-'
+            | '='
+            | '|'
+            | '{'
+            | '}'
+            | '.'
+            | '!'
+    ) {
+        out.push('\\');
+    }
+    out.push(ch);
+}
+
+fn escape_markdown_v2_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    for ch in text.chars() {
+        escape_markdown_v2_char(ch, &mut out);
+    }
+    out
+}
+
+fn parse_markdown_link(text: &str) -> Option<(usize, &str, &str)> {
+    if !text.starts_with('[') {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut i = 1usize;
+    let mut escaped = false;
+    let mut title_end = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if b == b']' {
+            title_end = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let title_end = title_end?;
+    if title_end + 1 >= bytes.len() || bytes[title_end + 1] != b'(' {
+        return None;
+    }
+
+    let url_start = title_end + 2;
+    let mut depth = 1usize;
+    let mut j = url_start;
+    escaped = false;
+    let mut url_end = None;
+    while j < bytes.len() {
+        let b = bytes[j];
+        if escaped {
+            escaped = false;
+            j += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            j += 1;
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+            j += 1;
+            continue;
+        }
+        if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                url_end = Some(j);
+                break;
+            }
+        }
+        j += 1;
+    }
+    let url_end = url_end?;
+    let consumed = url_end + 1;
+    Some((consumed, &text[1..title_end], &text[url_start..url_end]))
+}
+
+fn find_closing_code_fence(s: &str) -> Option<usize> {
+    let mut search = 0;
+    loop {
+        let rel = s[search..].find("```")?;
+        let abs = search + rel;
+        if abs == 0 || s.as_bytes()[abs - 1] == b'\n' {
+            return Some(abs);
+        }
+        search = abs + 3;
+    }
+}
+
+fn escape_code_content(content: &str, out: &mut String) {
+    for ch in content.chars() {
+        if ch == '`' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+}
+
+fn escape_url_content(url: &str, out: &mut String) {
+    for ch in url.chars() {
+        if ch == ')' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+}
+
+fn render_markdown_v2_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut i = 0usize;
+    let mut at_line_start = true;
+    let mut prev_char: Option<char> = None;
+    while i < text.len() {
+        let rest = &text[i..];
+
+        if rest.starts_with("```") {
+            let after_open = &rest[3..];
+            if let Some(close_offset) = find_closing_code_fence(after_open) {
+                let content = &after_open[..close_offset];
+                out.push_str("```");
+                escape_code_content(content, &mut out);
+                out.push_str("```");
+                i += 3 + close_offset + 3;
+                at_line_start = false;
+                prev_char = Some('`');
+                continue;
+            }
+        }
+
+        if rest.starts_with('`') {
+            let after_tick = &rest[1..];
+            if let Some(close_offset) = after_tick.find('`') {
+                let content = &after_tick[..close_offset];
+                if !content.is_empty() && !content.contains('\n') {
+                    out.push('`');
+                    escape_code_content(content, &mut out);
+                    out.push('`');
+                    i += 1 + close_offset + 1;
+                    at_line_start = false;
+                    prev_char = Some('`');
+                    continue;
+                }
+            }
+        }
+
+        if rest.starts_with("||") {
+            let after_open = &rest[2..];
+            if let Some(close_offset) = after_open.find("||") {
+                let content = &after_open[..close_offset];
+                if !content.is_empty() && !content.contains('\n') {
+                    out.push_str("||");
+                    out.push_str(&escape_markdown_v2_text(content));
+                    out.push_str("||");
+                    i += 2 + close_offset + 2;
+                    at_line_start = false;
+                    prev_char = Some('|');
+                    continue;
+                }
+            }
+        }
+
+        if let Some(inner) = rest.strip_prefix("**").and_then(|t| {
+            t.find("**").map(|end| &t[..end]).filter(|t| !t.is_empty())
+        }) {
+            out.push('*');
+            out.push_str(&escape_markdown_v2_text(inner));
+            out.push('*');
+            i += inner.len() + 4;
+            at_line_start = false;
+            prev_char = Some('*');
+            continue;
+        }
+
+        if let Some(inner) = rest.strip_prefix('*').and_then(|t| {
+            t.find('*').map(|end| &t[..end]).filter(|t| {
+                !t.is_empty() && !t.starts_with(' ') && !t.ends_with(' ') && !t.contains('\n')
+            })
+        }) {
+            out.push('*');
+            out.push_str(&escape_markdown_v2_text(inner));
+            out.push('*');
+            i += inner.len() + 2;
+            at_line_start = false;
+            prev_char = Some('*');
+            continue;
+        }
+
+        let prev_is_word = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '_');
+        if !prev_is_word && rest.starts_with("__") {
+            let after_open = &rest[2..];
+            if let Some(close_offset) = after_open.find("__") {
+                let content = &after_open[..close_offset];
+                if !content.is_empty() && !content.contains('\n') {
+                    out.push_str("__");
+                    out.push_str(&escape_markdown_v2_text(content));
+                    out.push_str("__");
+                    i += 2 + close_offset + 2;
+                    at_line_start = false;
+                    prev_char = Some('_');
+                    continue;
+                }
+            }
+        }
+
+        let prev_is_word = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '_');
+        if !prev_is_word {
+            if let Some(inner) = rest.strip_prefix('_').and_then(|t| {
+                t.find('_').map(|end| &t[..end]).filter(|t| {
+                    !t.is_empty() && !t.starts_with(' ') && !t.ends_with(' ') && !t.contains('\n')
+                })
+            }) {
+                out.push('_');
+                out.push_str(&escape_markdown_v2_text(inner));
+                out.push('_');
+                i += inner.len() + 2;
+                at_line_start = false;
+                prev_char = Some('_');
+                continue;
+            }
+        }
+
+        let prev_is_tilde = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '~');
+        if !prev_is_tilde {
+            if let Some(inner) = rest.strip_prefix('~').and_then(|t| {
+                t.find('~').map(|end| &t[..end]).filter(|t| {
+                    !t.is_empty() && !t.starts_with(' ') && !t.ends_with(' ') && !t.contains('\n')
+                })
+            }) {
+                out.push('~');
+                out.push_str(&escape_markdown_v2_text(inner));
+                out.push('~');
+                i += inner.len() + 2;
+                at_line_start = false;
+                prev_char = Some('~');
+                continue;
+            }
+        }
+
+        if let Some((consumed, title, url)) = parse_markdown_link(rest) {
+            out.push('[');
+            out.push_str(&escape_markdown_v2_text(title));
+            out.push_str("](");
+            escape_url_content(url, &mut out);
+            out.push(')');
+            i += consumed;
+            at_line_start = false;
+            prev_char = Some(')');
+            continue;
+        }
+
+        if let Some(ch) = rest.chars().next() {
+            if ch == '\n' {
+                out.push('\n');
+                at_line_start = true;
+            } else if ch == '>' && at_line_start {
+                out.push('>');
+                at_line_start = false;
+            } else {
+                escape_markdown_v2_char(ch, &mut out);
+                at_line_start = false;
+            }
+            prev_char = Some(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    out
+}
+
+fn markdown_v2_candidates(text: &str) -> Vec<String> {
+    let normalized = normalize_telegram_markdown(text);
+    let rendered = render_markdown_v2_safe(&normalized);
+    let mut candidates = Vec::new();
+    for candidate in [text.to_string(), normalized, rendered] {
+        if !candidates.iter().any(|c| c == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 #[derive(Clone)]
@@ -115,23 +521,33 @@ impl TelegramChannel {
     async fn send_text(&self, chat_id: &str, text: &str) -> Result<()> {
         let chunks = split_message(text, self.max_message_length);
         for (i, chunk) in chunks.iter().enumerate() {
-            let body = serde_json::json!({
-                "chat_id": chat_id,
-                "text": chunk,
-                "parse_mode": "Markdown"
-            });
-
-            let resp = self
-                .client
-                .post(self.api_url("sendMessage"))
-                .json(&body)
-                .send()
-                .await?;
-
-            if !resp.status().is_success() {
+            let candidates = markdown_v2_candidates(chunk);
+            let mut markdown_errors = Vec::new();
+            let mut markdown_ok = false;
+            for candidate in &candidates {
+                if markdown_ok {
+                    break;
+                }
+                let body = serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": candidate,
+                    "parse_mode": "MarkdownV2"
+                });
+                let resp = self
+                    .client
+                    .post(self.api_url("sendMessage"))
+                    .json(&body)
+                    .send()
+                    .await?;
+                if resp.status().is_success() {
+                    markdown_ok = true;
+                    break;
+                }
                 let status = resp.status();
                 let err = resp.text().await.unwrap_or_default();
-
+                markdown_errors.push(format!("{status}: {err}"));
+            }
+            if !markdown_ok {
                 let plain_body = serde_json::json!({
                     "chat_id": chat_id,
                     "text": chunk,
@@ -145,8 +561,9 @@ impl TelegramChannel {
 
                 if !plain_resp.status().is_success() {
                     let plain_err = plain_resp.text().await.unwrap_or_default();
+                    let md_err = markdown_errors.join(" | ");
                     anyhow::bail!(
-                        "Telegram sendMessage failed (markdown {status}: {err}; plain: {plain_err})"
+                        "Telegram sendMessage failed (markdown: {md_err}; plain: {plain_err})"
                     );
                 }
             }
@@ -159,40 +576,40 @@ impl TelegramChannel {
     }
 
     async fn send_text_msg(&self, chat_id: &str, text: &str) -> Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        });
-
-        let resp = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let plain_body = serde_json::json!({
+        let candidates = markdown_v2_candidates(text);
+        for candidate in &candidates {
+            let body = serde_json::json!({
                 "chat_id": chat_id,
-                "text": text,
+                "text": candidate,
+                "parse_mode": "MarkdownV2"
             });
-            let plain_resp = self
+            let resp = self
                 .client
                 .post(self.api_url("sendMessage"))
-                .json(&plain_body)
+                .json(&body)
                 .send()
                 .await?;
-            let plain_status = plain_resp.status();
-            let plain_raw = plain_resp.text().await?;
-            if !plain_status.is_success() {
-                anyhow::bail!("Telegram sendMessage fallback failed ({plain_status}): {plain_raw}");
+            if resp.status().is_success() {
+                let data: serde_json::Value = resp.json().await?;
+                return Ok(data);
             }
-            let data: serde_json::Value = serde_json::from_str(&plain_raw)?;
-            return Ok(data);
         }
-
-        let data: serde_json::Value = resp.json().await?;
+        let plain_body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        });
+        let plain_resp = self
+            .client
+            .post(self.api_url("sendMessage"))
+            .json(&plain_body)
+            .send()
+            .await?;
+        let plain_status = plain_resp.status();
+        let plain_raw = plain_resp.text().await?;
+        if !plain_status.is_success() {
+            anyhow::bail!("Telegram sendMessage fallback failed ({plain_status}): {plain_raw}");
+        }
+        let data: serde_json::Value = serde_json::from_str(&plain_raw)?;
         Ok(data)
     }
 
@@ -345,11 +762,20 @@ impl Channel for TelegramChannel {
             "You are responding via Telegram. Rich content markers:\n\
              - <image>URL</image> — Send an image by URL\n\
              - <voice>PATH</voice> — Send a voice message from a file path\n\
-             Formatting rules for Telegram:\n\
-             1. Telegram Markdown rendering is limited. Do NOT use Markdown tables.\n\
-             2. For tabular or aligned content, use fenced code blocks instead.\n\
-             3. For simple comparisons, prefer concise bullet lists over wide layouts.\n\
-             4. Keep formatting robust under message splitting; avoid fragile nested Markdown.\n\
+             Response format contract:\n\
+             1. Put the conclusion in the first line.\n\
+             2. Then use a numbered list with 2-4 key points.\n\
+             3. Keep each point short (no more than 2 sentences).\n\
+             4. Default length: 180-450 Chinese characters unless the user explicitly asks for detail.\n\
+             5. If details are long, send a compact summary first, then ask whether to continue.\n\
+             Formatting rules for Telegram MarkdownV2:\n\
+             1. Format text for Telegram MarkdownV2. Do NOT use Markdown tables.\n\
+             2. Use Telegram-compatible bold as *bold* (single asterisks), not **bold**.\n\
+             3. Hyperlinks are allowed as [title](https://example.com), but bare URLs are preferred for reliability.\n\
+             4. Escape MarkdownV2 special characters when needed to avoid rendering errors.\n\
+             5. For tabular or aligned content, use fenced code blocks instead.\n\
+             6. Avoid fragile nested Markdown; keep formatting robust under message splitting.\n\
+             7. If MarkdownV2 rendering fails after splitting, plain text fallback is acceptable.\n\
              CRITICAL RULES:\n\
              1. NEVER fabricate or guess these markers. Only use paths/URLs returned by tools.\n\
              2. When the tts tool returns a marker like <voice>/tmp/zerda_tts_xxx.ogg</voice>, include it EXACTLY as-is in your response.\n\
@@ -419,51 +845,70 @@ impl Channel for TelegramChannel {
     ) -> Result<()> {
         let is_intermediate = text.ends_with('▌');
 
-        let body = if is_intermediate {
-            serde_json::json!({
-                "chat_id": recipient,
-                "message_id": message_id,
-                "text": text,
-            })
-        } else {
-            serde_json::json!({
-                "chat_id": recipient,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "Markdown"
-            })
-        };
-
-        let resp = self
-            .client
-            .post(self.api_url("editMessageText"))
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let err_text = resp.text().await.unwrap_or_default();
-            if is_intermediate {
-                anyhow::bail!("editMessageText failed: {err_text}");
-            }
-            tracing::debug!("editMessageText with Markdown failed: {err_text}");
-            let plain_body = serde_json::json!({
+        if is_intermediate {
+            let body = serde_json::json!({
                 "chat_id": recipient,
                 "message_id": message_id,
                 "text": text,
             });
-            let retry_resp = self
+            let resp = self
                 .client
                 .post(self.api_url("editMessageText"))
-                .json(&plain_body)
+                .json(&body)
                 .send()
                 .await?;
-            if !retry_resp.status().is_success() {
-                let plain_err = retry_resp.text().await.unwrap_or_default();
-                anyhow::bail!("editMessageText failed (markdown: {err_text}; plain: {plain_err})");
+            if !resp.status().is_success() {
+                let err_text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("editMessageText failed: {err_text}");
             }
+            return Ok(());
         }
 
+        let candidates = markdown_v2_candidates(text);
+        let mut markdown_errors = Vec::new();
+        for candidate in &candidates {
+            let body = serde_json::json!({
+                "chat_id": recipient,
+                "message_id": message_id,
+                "text": candidate,
+                "parse_mode": "MarkdownV2"
+            });
+            let resp = self
+                .client
+                .post(self.api_url("editMessageText"))
+                .json(&body)
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                return Ok(());
+            }
+            let status = resp.status();
+            let err_text = resp.text().await.unwrap_or_default();
+            markdown_errors.push(format!("{status}: {err_text}"));
+        }
+
+        tracing::debug!(
+            "editMessageText with MarkdownV2 failed: {}",
+            markdown_errors.join(" | ")
+        );
+        let plain_body = serde_json::json!({
+            "chat_id": recipient,
+            "message_id": message_id,
+            "text": text,
+        });
+        let plain_resp = self
+            .client
+            .post(self.api_url("editMessageText"))
+            .json(&plain_body)
+            .send()
+            .await?;
+        if !plain_resp.status().is_success() {
+            let plain_err = plain_resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "editMessageText failed (markdown: {}; plain: {plain_err})",
+                markdown_errors.join(" | ")
+            );
+        }
         Ok(())
     }
 
