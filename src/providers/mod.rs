@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{ProviderConfig, RetryConfig};
-use crate::logging::Redacted;
+use crate::logging::{summarize_json, summarize_text};
 
 pub mod anthropic;
 pub mod openai_chat;
@@ -416,7 +416,6 @@ impl HttpClient {
         body: &Value,
         provider_name: &str,
     ) -> Result<Value> {
-        tracing::debug!("{provider_name} request body: {:?}", Redacted::new(body));
         let resp = self
             .send_with_retry(url, headers, body, provider_name)
             .await?;
@@ -428,11 +427,11 @@ impl HttpClient {
             .with_context(|| format!("Failed to read {provider_name} response"))?;
 
         let resp_body: Value = serde_json::from_str(&raw_text).with_context(|| {
-            let truncated = &raw_text[..raw_text.floor_char_boundary(500.min(raw_text.len()))];
-            format!("Failed to parse {provider_name} response: {truncated}")
+            format!(
+                "Failed to parse {provider_name} response: {}",
+                summarize_text(&raw_text)
+            )
         })?;
-
-        tracing::debug!("{provider_name} response: {:?}", Redacted::new(&resp_body));
 
         if !status.is_success() {
             let error_msg = resp_body
@@ -463,11 +462,7 @@ impl HttpClient {
             let msg = serde_json::from_str::<Value>(&raw_text)
                 .ok()
                 .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                .unwrap_or_else(|| {
-                    let truncated =
-                        &raw_text[..raw_text.floor_char_boundary(500.min(raw_text.len()))];
-                    format!("Raw response: {truncated}")
-                });
+                .unwrap_or_else(|| format!("Raw response: {}", summarize_text(&raw_text)));
             anyhow::bail!("{provider_name} API error ({status}): {msg}");
         }
 
@@ -483,14 +478,25 @@ impl HttpClient {
     ) -> Result<reqwest::Response> {
         let mut last_error: Option<anyhow::Error> = None;
 
-        tracing::debug!("{provider_name} request to {url}");
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                provider = provider_name,
+                url = %url,
+                payload = %summarize_json(body),
+                "Provider request"
+            );
+        }
 
         for attempt in 0..=self.retry_config.max_retries {
+            let attempt_started = Instant::now();
             if attempt > 0 {
                 let delay = self.compute_backoff(attempt, None);
-                tracing::warn!(
-                    "{provider_name} retry {attempt}/{} after {delay}ms",
-                    self.retry_config.max_retries
+                tracing::info!(
+                    provider = provider_name,
+                    attempt,
+                    max_retries = self.retry_config.max_retries,
+                    delay_ms = delay,
+                    "Provider retry scheduled"
                 );
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
@@ -510,7 +516,12 @@ impl HttpClient {
                 Ok(r) => r,
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
-                        tracing::warn!("{provider_name} network error (attempt {attempt}): {e}");
+                        tracing::warn!(
+                            provider = provider_name,
+                            attempt,
+                            elapsed_ms = attempt_started.elapsed().as_millis(),
+                            "Provider network error: {e}"
+                        );
                         last_error = Some(e.into());
                         continue;
                     }
@@ -530,12 +541,13 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| {
-                        let truncated =
-                            &raw_text[..raw_text.floor_char_boundary(500.min(raw_text.len()))];
-                        format!("Rate limited. Raw: {truncated}")
-                    });
-                tracing::warn!("{provider_name} rate limited (attempt {attempt}): {error_msg}");
+                    .unwrap_or_else(|| format!("Rate limited. Raw: {}", summarize_text(&raw_text)));
+                tracing::warn!(
+                    provider = provider_name,
+                    attempt,
+                    elapsed_ms = attempt_started.elapsed().as_millis(),
+                    "Provider rate limited: {error_msg}"
+                );
                 let delay = self.compute_backoff(attempt + 1, retry_after.map(|s| s * 1000));
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 last_error = Some(anyhow::anyhow!(
@@ -549,13 +561,13 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| {
-                        let truncated =
-                            &raw_text[..raw_text.floor_char_boundary(500.min(raw_text.len()))];
-                        format!("Server error. Raw: {truncated}")
-                    });
+                    .unwrap_or_else(|| format!("Server error. Raw: {}", summarize_text(&raw_text)));
                 tracing::warn!(
-                    "{provider_name} server error {status} (attempt {attempt}): {error_msg}"
+                    provider = provider_name,
+                    status = %status,
+                    attempt,
+                    elapsed_ms = attempt_started.elapsed().as_millis(),
+                    "Provider server error: {error_msg}"
                 );
                 last_error = Some(anyhow::anyhow!(
                     "{provider_name} API error ({status}): {error_msg}"
@@ -563,6 +575,13 @@ impl HttpClient {
                 continue;
             }
 
+            tracing::debug!(
+                provider = provider_name,
+                status = %status,
+                attempt,
+                elapsed_ms = attempt_started.elapsed().as_millis(),
+                "Provider response"
+            );
             return Ok(resp);
         }
 

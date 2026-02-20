@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 let level = &cfg.log.level;
                 let filter = if level == "debug" || level == "trace" {
-                    format!("{level},hyper_util=warn,reqwest=warn,h2=warn,rustls=warn")
+                    format!("{level},hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,rmcp=info")
                 } else {
                     level.to_string()
                 };

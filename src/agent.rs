@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use futures::StreamExt as _;
 use uuid::Uuid;
 
 use crate::config::AgentConfig;
-use crate::logging::Redacted;
+use crate::logging::{summarize_json, summarize_text};
 use crate::providers::{
     create_provider, ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent,
     ThinkingBlock, ToolCall, ToolSpec, Usage,
@@ -301,7 +302,12 @@ impl Agent {
                     arguments,
                 }),
                 Err(e) => {
-                    tracing::warn!("Failed to parse tool args for {name}: {e} (raw: {raw})");
+                    tracing::warn!(
+                        tool = %name,
+                        tool_call_id = %id,
+                        raw = %summarize_text(&raw),
+                        "Failed to parse tool args: {e}"
+                    );
                     parse_errors.push((id, name));
                 }
             }
@@ -627,20 +633,35 @@ impl Drop for Agent {
 }
 
 async fn execute_tool(tool_map: &HashMap<&str, &dyn Tool>, call: &ToolCall) -> ToolResult {
-    tracing::debug!(tool = %call.name, args = ?Redacted::new(&call.arguments), "Executing tool");
+    let started = Instant::now();
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
+            tool = %call.name,
+            tool_call_id = %call.id,
+            args = %summarize_json(&call.arguments),
+            "Tool start"
+        );
+    }
     if let Some(tool) = tool_map.get(call.name.as_str()) {
         match tool.execute(call.arguments.clone()).await {
             Ok(result) => {
                 tracing::debug!(
                     tool = %call.name,
+                    tool_call_id = %call.id,
                     is_error = result.is_error,
                     output_len = result.output.len(),
-                    "Tool result"
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Tool done"
                 );
                 result
             }
             Err(e) => {
-                tracing::warn!(tool = %call.name, "Tool execution error: {e}");
+                tracing::warn!(
+                    tool = %call.name,
+                    tool_call_id = %call.id,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Tool execution error: {e}"
+                );
                 ToolResult {
                     output: format!("Tool execution error: {e}"),
                     is_error: true,

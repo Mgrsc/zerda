@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -182,16 +183,13 @@ impl OpenAiChatProvider {
             .get("usage")
             .map(|u| Usage::from_json(u, "prompt_tokens", "completion_tokens"));
 
-        tracing::debug!(
-            "OpenAI Chat response: has_text={}, tool_calls={}",
-            text.as_ref().is_some_and(|t| !t.is_empty()),
-            tool_calls.len()
-        );
         if let Some(ref u) = usage {
             tracing::info!(
-                "OpenAI Chat tokens: in={}, out={}",
+                "OpenAI Chat done: in={}, out={}, text={}, tools={}",
                 u.input_tokens,
-                u.output_tokens
+                u.output_tokens,
+                text.as_ref().is_some_and(|t| !t.is_empty()),
+                tool_calls.len()
             );
         }
 
@@ -217,10 +215,16 @@ impl Provider for OpenAiChatProvider {
         let url = format!("{}/chat/completions", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
         tracing::info!("OpenAI Chat: model={}", opts.model);
+        let started = Instant::now();
         let resp_body = self
             .http
             .send_request(&url, &headers, &body, "OpenAI Chat")
             .await?;
+        tracing::info!(
+            "OpenAI Chat response received: model={}, elapsed_ms={}",
+            opts.model,
+            started.elapsed().as_millis()
+        );
         Self::parse_response(&resp_body)
     }
 
@@ -238,10 +242,16 @@ impl Provider for OpenAiChatProvider {
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
         tracing::info!("OpenAI Chat stream: model={}", opts.model);
+        let started = Instant::now();
         let resp = self
             .http
             .send_stream_request(&url, &headers, &body, "OpenAI Chat")
             .await?;
+        tracing::info!(
+            "OpenAI Chat stream connected: model={}, elapsed_ms={}",
+            opts.model,
+            started.elapsed().as_millis()
+        );
 
         Ok(sse_stream(
             resp.bytes_stream(),

@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
+use uuid::Uuid;
 
 use crate::agent;
 use crate::channels::{self, Channel};
@@ -616,6 +619,8 @@ pub async fn run_serve(
         let sender = msg.sender;
         let session_id = msg.session_id;
         let channel_name = msg.channel;
+        let turn_id = Uuid::new_v4().to_string();
+        let turn_started = Instant::now();
 
         while let Ok(next) = rx.try_recv() {
             if next.session_id == session_id && next.channel == channel_name {
@@ -630,6 +635,20 @@ pub async fn run_serve(
                 pending.push(next);
             }
         }
+
+        let turn_span = tracing::info_span!(
+            "turn",
+            turn_id = %turn_id,
+            channel = %channel_name,
+            session_id = %session_id,
+            sender = %sender
+        );
+        tracing::info!(
+            parent: &turn_span,
+            content_chars = content.chars().count(),
+            has_content_parts = content_parts.as_ref().is_some_and(|parts| !parts.is_empty()),
+            "Turn start"
+        );
 
         let memory_dir = config::resolve_path(&hot.cfg.agent.memory_dir);
         let reply_target = ReplyTarget::Unicast {
@@ -673,6 +692,12 @@ pub async fn run_serve(
                 if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
                     tracing::warn!("Failed to save session {storage_id}: {e}");
                 }
+                tracing::info!(
+                    parent: &turn_span,
+                    elapsed_ms = turn_started.elapsed().as_millis(),
+                    response_chars = feedback.chars().count(),
+                    "Turn done"
+                );
                 session_agents.insert(session_key, session_agent);
                 continue;
             }
@@ -694,6 +719,7 @@ pub async fn run_serve(
             let ch = Arc::clone(ch);
             let sender = sender.clone();
             let token = typing_cancel.clone();
+            let span = turn_span.clone();
             tokio::spawn(async move {
                 loop {
                     if token.is_cancelled() {
@@ -707,7 +733,8 @@ pub async fn run_serve(
                         () = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
                     }
                 }
-            });
+            }
+            .instrument(span));
         }
 
         let buffer = Arc::new(std::sync::Mutex::new(StreamBuffer::default()));
@@ -719,6 +746,7 @@ pub async fn run_serve(
             let sender = sender.clone();
             let token = flush_cancel.clone();
             let typing_token = typing_cancel.clone();
+            let span = turn_span.clone();
             Some(tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 loop {
@@ -754,7 +782,7 @@ pub async fn run_serve(
 
                     if let Some(ref mid) = mid {
                         if let Err(e) = ch.send_stream_update(&sender, mid, &display_text).await {
-                            tracing::debug!("Failed to send stream update: {e}");
+                            tracing::debug!(message_id = %mid, "Failed to send stream update: {e}");
                         }
                     } else {
                         match ch.send_stream_start(&sender, &display_text).await {
@@ -775,7 +803,8 @@ pub async fn run_serve(
                         () = tokio::time::sleep(std::time::Duration::from_millis(1300)) => {}
                     }
                 }
-            }))
+            }
+            .instrument(span)))
         } else {
             None
         };
@@ -790,6 +819,7 @@ pub async fn run_serve(
                     guard.overflow = true;
                 }
             })
+            .instrument(turn_span.clone())
             .await
         {
             Ok(r) => r,
@@ -837,6 +867,13 @@ pub async fn run_serve(
         } else {
             println!("{}", channels::cli::sanitize_terminal_text(&response));
         }
+
+        tracing::info!(
+            parent: &turn_span,
+            elapsed_ms = turn_started.elapsed().as_millis(),
+            response_chars = response.chars().count(),
+            "Turn done"
+        );
 
         check_reload(&mut session_agent, ctx, hot, supplement.as_deref()).await;
 

@@ -6,6 +6,7 @@ use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use super::{Channel, ChannelMessage};
+use crate::logging::{summarize_text, text_fingerprint};
 use crate::providers::ContentPart;
 use crate::rich_content::{self, RichSegment};
 use crate::stt::SttProvider;
@@ -111,6 +112,44 @@ fn find_markdown_safe_split(window: &str) -> Option<usize> {
     }
 
     last_split.filter(|&p| p > 0)
+}
+
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.len() > 2
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|')
+        && t.ends_with('|')
+        && t.len() > 2
+        && t.chars()
+            .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+}
+
+fn wrap_tables(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < lines.len() {
+        if i + 1 < lines.len() && is_table_row(lines[i]) && is_table_separator(lines[i + 1]) {
+            out.push_str("```\n");
+            while i < lines.len() && is_table_row(lines[i]) {
+                out.push_str(lines[i]);
+                out.push('\n');
+                i += 1;
+            }
+            out.push_str("```\n");
+        } else {
+            out.push_str(lines[i]);
+            if i + 1 < lines.len() {
+                out.push('\n');
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 fn normalize_telegram_markdown(text: &str) -> String {
@@ -444,10 +483,11 @@ fn render_markdown_v2_safe(text: &str) -> String {
 }
 
 fn markdown_v2_candidates(text: &str) -> Vec<String> {
-    let normalized = normalize_telegram_markdown(text);
+    let table_wrapped = wrap_tables(text);
+    let normalized = normalize_telegram_markdown(&table_wrapped);
     let rendered = render_markdown_v2_safe(&normalized);
     let mut candidates = Vec::new();
-    for candidate in [text.to_string(), normalized, rendered] {
+    for candidate in [text.to_string(), table_wrapped, normalized, rendered] {
         if !candidates.iter().any(|c| c == &candidate) {
             candidates.push(candidate);
         }
@@ -524,7 +564,7 @@ impl TelegramChannel {
             let candidates = markdown_v2_candidates(chunk);
             let mut markdown_errors = Vec::new();
             let mut markdown_ok = false;
-            for candidate in &candidates {
+            for (idx, candidate) in candidates.iter().enumerate() {
                 if markdown_ok {
                     break;
                 }
@@ -545,6 +585,12 @@ impl TelegramChannel {
                 }
                 let status = resp.status();
                 let err = resp.text().await.unwrap_or_default();
+                tracing::debug!(
+                    candidate_idx = idx,
+                    candidate = %summarize_text(candidate),
+                    status = %status,
+                    "sendMessage MarkdownV2 candidate rejected: {err}"
+                );
                 markdown_errors.push(format!("{status}: {err}"));
             }
             if !markdown_ok {
@@ -859,6 +905,9 @@ impl Channel for TelegramChannel {
                 .await?;
             if !resp.status().is_success() {
                 let err_text = resp.text().await.unwrap_or_default();
+                if err_text.contains("message is not modified") {
+                    return Ok(());
+                }
                 anyhow::bail!("editMessageText failed: {err_text}");
             }
             return Ok(());
@@ -866,7 +915,7 @@ impl Channel for TelegramChannel {
 
         let candidates = markdown_v2_candidates(text);
         let mut markdown_errors = Vec::new();
-        for candidate in &candidates {
+        for (idx, candidate) in candidates.iter().enumerate() {
             let body = serde_json::json!({
                 "chat_id": recipient,
                 "message_id": message_id,
@@ -884,6 +933,16 @@ impl Channel for TelegramChannel {
             }
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
+            if err_text.contains("message is not modified") {
+                return Ok(());
+            }
+            tracing::debug!(
+                candidate_idx = idx,
+                candidate_chars = candidate.chars().count(),
+                candidate_fp = %text_fingerprint(candidate),
+                status = %status,
+                "editMessageText MarkdownV2 candidate rejected: {err_text}"
+            );
             markdown_errors.push(format!("{status}: {err_text}"));
         }
 
@@ -904,6 +963,9 @@ impl Channel for TelegramChannel {
             .await?;
         if !plain_resp.status().is_success() {
             let plain_err = plain_resp.text().await.unwrap_or_default();
+            if plain_err.contains("message is not modified") {
+                return Ok(());
+            }
             anyhow::bail!(
                 "editMessageText failed (markdown: {}; plain: {plain_err})",
                 markdown_errors.join(" | ")
