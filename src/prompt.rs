@@ -30,7 +30,11 @@ pub fn build_system_prompt(
         - When you need to call a tool, call it directly without asking for permission\n\
         - After editing zerda.toml, call the reload tool to apply the configuration\n\
         - Record important information to MEMORY.md using the memory tool; read it when needed\n\
-        - After adding or removing MCP servers or skills, perform a light reload (/reload command)"
+        - After adding or removing MCP servers or skills, perform a light reload (/reload command)\n\
+        - Prefer the shortest path: do not build a perfect solution in one pass; get core results first\n\
+        - If a tool fails 2 times in a row, abandon that approach and switch to a simpler alternative or ask the user\n\
+        - Before each tool call, confirm it advances the goal; if not, stop and reassess\n\
+        - Do not repeatedly attempt the same approach for the same problem"
             .to_string(),
     );
 

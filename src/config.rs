@@ -138,8 +138,10 @@ pub struct AgentConfig {
     pub max_prompt_chars: usize,
 }
 
+const MIN_MAX_ITERATIONS: usize = 10;
+
 const fn default_max_iterations() -> usize {
-    10
+    20
 }
 const fn default_max_history() -> usize {
     30
@@ -344,6 +346,16 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
         config.mcp.extend(mcp_file.mcp);
     }
 
+    if config.agent.max_iterations < MIN_MAX_ITERATIONS {
+        tracing::warn!(
+            "agent.max_iterations={} is below minimum {}; using {}",
+            config.agent.max_iterations,
+            MIN_MAX_ITERATIONS,
+            MIN_MAX_ITERATIONS
+        );
+        config.agent.max_iterations = MIN_MAX_ITERATIONS;
+    }
+
     validate_config(&config)?;
 
     Ok(config)
@@ -368,8 +380,9 @@ fn validate_config(config: &Config) -> Result<()> {
         "max_tokens must be greater than 0"
     );
     anyhow::ensure!(
-        config.agent.max_iterations > 0,
-        "max_iterations must be greater than 0"
+        config.agent.max_iterations >= MIN_MAX_ITERATIONS,
+        "max_iterations must be greater than or equal to {}",
+        MIN_MAX_ITERATIONS
     );
     anyhow::ensure!(
         config.agent.max_history > config.agent.compaction_keep_recent,

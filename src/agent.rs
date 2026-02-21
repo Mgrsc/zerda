@@ -138,7 +138,8 @@ impl Agent {
     ) -> Result<String> {
         let tool_specs: Vec<ToolSpec> = tools.iter().map(|t| t.spec()).collect();
 
-        for _iteration in 0..self.config.max_iterations {
+        let max_iterations = self.config.max_iterations;
+        for iteration in 0..max_iterations {
             let output = match &strategy {
                 CallStrategy::Blocking => {
                     let response = provider.chat(&self.history, &tool_specs, opts).await?;
@@ -226,10 +227,112 @@ impl Agent {
                 ));
             }
 
-            self.process_tool_calls(&exec_tool_calls, tools).await;
+            self.process_tool_calls(&exec_tool_calls, tools, iteration, max_iterations)
+                .await;
         }
 
-        anyhow::bail!("Exceeded max iterations ({})", self.config.max_iterations)
+        tracing::warn!(
+            summary_kind = "iteration_fallback",
+            max_iterations,
+            history_messages = self.history.len(),
+            "Iteration budget exhausted; generating fallback summary"
+        );
+        let summary = self.generate_iteration_fallback().await;
+        self.history.push(ConversationMessage {
+            role: Role::Assistant,
+            content: vec![ContentPart::Text(summary.clone())],
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
+        });
+        Ok(summary)
+    }
+
+    async fn generate_iteration_fallback(&self) -> String {
+        let (comp_provider, comp_opts) = match self.compression_provider.as_ref() {
+            Some(pair) => pair,
+            None => {
+                tracing::warn!(
+                    summary_kind = "iteration_fallback",
+                    reason = "missing_compression_provider",
+                    "Compression provider not configured; using static fallback summary"
+                );
+                return self.static_fallback();
+            }
+        };
+
+        let mut transcript = String::new();
+        let recent: Vec<&ConversationMessage> = self
+            .history
+            .iter()
+            .filter(|m| !matches!(m.role, Role::System))
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let recent_messages = recent.len();
+
+        for msg in &recent {
+            let role_str = match &msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::ToolResult { .. } => "ToolResult",
+                Role::System => continue,
+            };
+            let text = msg.text_content();
+            let _ = writeln!(transcript, "{role_str}: {text}");
+        }
+
+        let transcript_chars = transcript.chars().count();
+        tracing::info!(
+            summary_kind = "iteration_fallback",
+            model = %comp_opts.model,
+            recent_messages,
+            transcript_chars,
+            "Generating iteration fallback summary with compression model"
+        );
+
+        let prompt = format!(
+            "The agent has reached its maximum iteration limit ({max}). \
+             Summarize what has been accomplished, what remains unfinished, \
+             and suggest next steps for the user. \
+             You MUST write the summary in the same language as the user's most recent message. \
+             Be concise.\n\n{transcript}",
+            max = self.config.max_iterations,
+        );
+
+        let messages = vec![ConversationMessage::user(prompt)];
+        match comp_provider.chat(&messages, &[], comp_opts).await {
+            Ok(response) => {
+                let summary = response.text.unwrap_or_else(|| self.static_fallback());
+                tracing::info!(
+                    summary_kind = "iteration_fallback",
+                    model = %comp_opts.model,
+                    summary_chars = summary.chars().count(),
+                    "Iteration fallback summary generated"
+                );
+                summary
+            }
+            Err(e) => {
+                tracing::warn!(
+                    summary_kind = "iteration_fallback",
+                    model = %comp_opts.model,
+                    "Failed to generate iteration fallback summary: {e}"
+                );
+                self.static_fallback()
+            }
+        }
+    }
+
+    fn static_fallback(&self) -> String {
+        format!(
+            "Reached the maximum iteration limit ({}). \
+             Some work may be incomplete. Please review the conversation \
+             and continue with a follow-up message if needed.",
+            self.config.max_iterations,
+        )
     }
 
     async fn consume_stream(
@@ -334,7 +437,13 @@ impl Agent {
         })
     }
 
-    async fn process_tool_calls(&mut self, tool_calls: &[ToolCall], tools: &[Box<dyn Tool>]) {
+    async fn process_tool_calls(
+        &mut self,
+        tool_calls: &[ToolCall],
+        tools: &[Box<dyn Tool>],
+        iteration: usize,
+        max_iterations: usize,
+    ) {
         let tool_map: HashMap<&str, &dyn Tool> =
             tools.iter().map(|t| (t.name(), t.as_ref())).collect();
         let mut idx = 0;
@@ -347,7 +456,7 @@ impl Agent {
 
             if !is_safe {
                 let result = self.execute_with_confirm(&tool_map, tc).await;
-                self.push_tool_result(tc, result);
+                self.push_tool_result(tc, result, iteration, max_iterations);
                 idx += 1;
                 continue;
             }
@@ -372,12 +481,18 @@ impl Agent {
                 .collect();
             let results = futures::future::join_all(futures).await;
             for (call, result) in batch.iter().zip(results) {
-                self.push_tool_result(call, result);
+                self.push_tool_result(call, result, iteration, max_iterations);
             }
         }
     }
 
-    fn push_tool_result(&mut self, tc: &ToolCall, result: ToolResult) {
+    fn push_tool_result(
+        &mut self,
+        tc: &ToolCall,
+        result: ToolResult,
+        iteration: usize,
+        max_iterations: usize,
+    ) {
         let output = if result.output.len() > self.config.max_tool_output_chars {
             if self.has_subagent {
                 let path = std::env::temp_dir().join(format!("zerda-tool-{}.txt", Uuid::new_v4()));
@@ -406,9 +521,29 @@ impl Agent {
         } else {
             result.output
         };
+
+        let display_iter = iteration + 1;
+        let mut tagged = format!("{output}\n[Iteration {display_iter}/{max_iterations}]");
+
+        if max_iterations > 1 {
+            if iteration + 1 == max_iterations * 9 / 10 {
+                tagged.push_str(
+                    "\n[Warning] Nearly out of iterations. Focus only on the most critical remaining work.",
+                );
+            } else if iteration + 1 == max_iterations * 3 / 4 {
+                tagged.push_str(
+                    "\n[Warning] 75% budget consumed. Prioritize essential steps and avoid exploratory actions.",
+                );
+            } else if iteration + 1 == max_iterations / 2 {
+                tagged.push_str(
+                    "\n[Warning] Half of iteration budget used. Consider reviewing your approach.",
+                );
+            }
+        }
+
         self.history.push(ConversationMessage::tool_result(
             &tc.id,
-            output,
+            tagged,
             result.is_error,
         ));
     }
@@ -423,6 +558,14 @@ impl Agent {
         if non_system_count <= self.config.max_history {
             return Ok(false);
         }
+
+        tracing::info!(
+            summary_kind = "history_compaction",
+            non_system_count,
+            max_history = self.config.max_history,
+            keep_recent = self.config.compaction_keep_recent,
+            "Auto-compact triggered"
+        );
 
         if self.compression_provider.is_none() {
             anyhow::bail!("History exceeds max_history but no compression provider configured");
@@ -480,6 +623,14 @@ impl Agent {
              Output plain text bullet points only.\n\n{transcript}"
         );
 
+        tracing::info!(
+            summary_kind = "history_compaction",
+            model = %comp_opts.model,
+            compacted_messages = indices_to_compact.len(),
+            transcript_chars = transcript.chars().count(),
+            "Generating history compaction summary with compression model"
+        );
+
         let messages = vec![ConversationMessage::user(prompt)];
         let response = comp_provider.chat(&messages, &[], comp_opts).await?;
 
@@ -505,6 +656,18 @@ impl Agent {
         });
 
         self.conversation_summary = Some(summary);
+
+        tracing::info!(
+            summary_kind = "history_compaction",
+            model = %comp_opts.model,
+            summary_chars = self
+                .conversation_summary
+                .as_ref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0),
+            remaining_history_messages = self.history.len(),
+            "History compaction summary generated"
+        );
 
         Ok(())
     }

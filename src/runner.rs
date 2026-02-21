@@ -842,11 +842,22 @@ pub async fn run_serve(
         if let Some(ref ch) = ch {
             if let Some(ref mid) = message_id {
                 let full_text = buffer.lock().unwrap().text.clone();
-                let final_text = if full_text.is_empty() {
-                    response.clone()
+                let final_source = if response.is_empty() {
+                    "stream_buffer"
                 } else {
-                    full_text
+                    "response"
                 };
+                let final_text = if response.is_empty() {
+                    full_text
+                } else {
+                    response.clone()
+                };
+                tracing::debug!(
+                    final_source,
+                    response_chars = response.chars().count(),
+                    selected_chars = final_text.chars().count(),
+                    "Final stream payload selected"
+                );
                 let clean_text = rich_content::strip_rich_markers(&final_text);
                 if !clean_text.is_empty() {
                     if let Err(e) = ch.send_stream_update(&sender, mid, &clean_text).await {

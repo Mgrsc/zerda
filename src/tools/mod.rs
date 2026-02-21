@@ -18,6 +18,7 @@ pub mod reload;
 pub mod shell;
 pub mod skill;
 pub mod subagent;
+pub mod todo;
 pub mod tts;
 pub mod write;
 
@@ -117,6 +118,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
         Box::new(reload::ReloadTool::new(config_path, reload_signal)),
         Box::new(memory_tool::MemoryTool::new(memory, max_memory_chars)),
         Box::new(skill::SkillTool::new(skills, skill_cache)),
+        Box::new(todo::TodoTool::new()),
     ];
     if let Some(provider) = tts_provider {
         tools.push(Box::new(tts::TtsTool::new(provider)));
