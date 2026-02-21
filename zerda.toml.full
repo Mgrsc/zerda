@@ -1,13 +1,14 @@
 # zerda complete configuration template
-# All values here are defaults; adjust as needed.
+# Fields marked as required have no code default and must be set explicitly.
+# Other values are aligned with code defaults.
 # ${VAR} syntax expands environment variables at load time.
 # Define MCP servers in mcp.toml (see mcp.toml.example).
 
 [provider]
-name = "openai_chat"                    # openai_chat | openai_responses | anthropic
-api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"         # leave empty to use the provider default endpoint
-model = "${OPENAI_MODEL}"
+name = "openai_chat"                    # required: openai_chat | openai_responses | anthropic
+api_key = "${OPENAI_API_KEY}"           # required
+base_url = ""                           # default: empty (use provider default endpoint)
+model = "${OPENAI_MODEL}"               # required
 temperature = 1.0
 max_tokens = 4096
 vision = true                           # whether to include image inputs
@@ -28,51 +29,44 @@ max_iterations = 10                     # maximum tool calls per turn
 max_history = 30                        # trigger compression when non-system messages exceed this value
 max_tool_output_chars = 30000           # truncate tool output above this threshold
 max_memory_tokens = 2000                # maximum token count for memory tool content
-identity_path = "~/.zerda/identity.md"  # path to the system prompt file
+identity_path = "~/.zerda/identity.md"  # default path to the system prompt file
 show_usage = false                      # print token usage at the end of each turn
 # max_budget_tokens = 1000000           # session token budget; stop when exceeded (optional, unlimited by default)
-confirm_tools = []                      # tools requiring manual confirmation, e.g. ["shell", "write"]
 max_memory_file_size = 102400           # maximum memory file size in bytes
 session_cleanup_days = 7                # auto-clean sessions older than N days
 tool_timeout = 300                      # tool execution timeout in seconds
 
-# Compression model (optional; compression is unavailable if omitted)
-[agent.compression_model]
-name = "openai_chat"
-api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"
-model = "${OPENAI_COMPRESSION_MODEL}"
-temperature = 0.3
-max_tokens = 4096
-vision = false
-
-# Subagent model (optional; falls back to compression_model, and subagent tool is not registered if both are missing)
-# [agent.subagent]
-# name = "openai_chat"
-# api_key = "${OPENAI_API_KEY}"
-# base_url = "${OPENAI_BASE_URL}"
-# model = "${OPENAI_SUBAGENT_MODEL}"
-# temperature = 0.3
+# Fast model (optional; falls back to main provider if omitted)
+# A cheaper/faster model for auxiliary tasks:
+#   - history compaction (conversation compression when context grows too long)
+#   - iteration fallback summary (when max_iterations is exhausted)
+#   - subagent tool (delegated sub-tasks and large output processing)
+# [agent.fast_model]
+# name = "openai_chat"                  # required when enabled
+# api_key = "${OPENAI_API_KEY}"         # required when enabled
+# base_url = ""                         # default
+# model = "${OPENAI_FAST_MODEL}"        # required when enabled
+# temperature = 1.0
 # max_tokens = 4096
-# vision = false
+# vision = true
 
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported
 # token = "${TELEGRAM_BOT_TOKEN}"
-# allowed_users = ["*"]                 # allowed user IDs; ["*"] means all users
+# allowed_users = []                    # default: empty means all users
 # max_message_length = 4096
 
 # TTS (optional; disabled when provider is empty)
 [tts]
-provider = "minimax"                    # minimax
-api_key = "${MINIMAX_API_KEY}"
+provider = ""                           # default: disabled
+# api_key = "${MINIMAX_API_KEY}"
 model = "speech-2.8-hd"
-voice_id = "female-shaonv"
+# voice_id = "female-shaonv"            # optional; default is unset
 
 # STT (optional; disabled when provider is empty)
 [stt]
-provider = "groq"                       # groq
-api_key = "${GROQ_API_KEY}"
+provider = ""                           # default: disabled
+# api_key = "${GROQ_API_KEY}"
 model = "whisper-large-v3-turbo"
 
 [log]

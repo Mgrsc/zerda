@@ -11,14 +11,12 @@ use uuid::Uuid;
 use crate::config::AgentConfig;
 use crate::logging::{summarize_json, summarize_text};
 use crate::providers::{
-    create_provider, ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent,
+    ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent,
     ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::tools::{Tool, ToolResult};
 use crate::util::fs::atomic_write_text;
 use crate::util::text::TruncateForUi;
-
-pub type ConfirmFn = dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync;
 
 struct TurnOutput {
     text: Option<String>,
@@ -38,44 +36,21 @@ pub struct Agent {
     pub history: Vec<ConversationMessage>,
     pub total_usage: Usage,
     config: AgentConfig,
-    confirm_fn: Option<Arc<ConfirmFn>>,
-    compression_provider: Option<(Box<dyn Provider>, ChatOptions)>,
+    compression_provider: (Arc<dyn Provider>, ChatOptions),
     conversation_summary: Option<String>,
-    has_subagent: bool,
     temp_files: Vec<PathBuf>,
 }
 
 impl Agent {
-    pub fn new(config: AgentConfig) -> Self {
-        let compression_provider = config.compression_model.as_ref().and_then(|comp_config| {
-            let opts = ChatOptions::from_provider_config(&comp_config.provider);
-            match create_provider(&comp_config.provider) {
-                Ok(p) => Some((p, opts)),
-                Err(e) => {
-                    tracing::warn!("Failed to create compression provider: {e}");
-                    None
-                }
-            }
-        });
-
+    pub fn new(config: AgentConfig, compression_provider: (Arc<dyn Provider>, ChatOptions)) -> Self {
         Self {
             history: Vec::new(),
             total_usage: Usage::default(),
             config,
-            confirm_fn: None,
             compression_provider,
             conversation_summary: None,
-            has_subagent: false,
             temp_files: Vec::new(),
         }
-    }
-
-    pub fn set_has_subagent(&mut self, has: bool) {
-        self.has_subagent = has;
-    }
-
-    pub fn set_confirm_fn(&mut self, f: Arc<ConfirmFn>) {
-        self.confirm_fn = Some(f);
     }
 
     pub fn set_system_prompt(&mut self, prompt: String) {
@@ -89,14 +64,6 @@ impl Agent {
 
     pub fn take_conversation_summary(&mut self) -> Option<String> {
         self.conversation_summary.take()
-    }
-
-    pub fn has_subagent(&self) -> bool {
-        self.has_subagent
-    }
-
-    pub fn confirm_fn(&self) -> Option<Arc<ConfirmFn>> {
-        self.confirm_fn.clone()
     }
 
     pub async fn run_turn(
@@ -246,17 +213,7 @@ impl Agent {
     }
 
     async fn generate_iteration_fallback(&self) -> String {
-        let (comp_provider, comp_opts) = match self.compression_provider.as_ref() {
-            Some(pair) => pair,
-            None => {
-                tracing::warn!(
-                    summary_kind = "iteration_fallback",
-                    reason = "missing_compression_provider",
-                    "Compression provider not configured; using static fallback summary"
-                );
-                return self.static_fallback();
-            }
-        };
+        let (comp_provider, comp_opts) = &self.compression_provider;
 
         let mut transcript = String::new();
         let recent: Vec<&ConversationMessage> = self
@@ -451,7 +408,7 @@ impl Agent {
                 .is_some_and(|tool| tool.is_safe_for_concurrent());
 
             if !is_safe {
-                let result = self.execute_with_confirm(&tool_map, tc).await;
+                let result = self.execute_with_timeout(&tool_map, tc).await;
                 self.push_tool_result(tc, result, iteration, max_iterations);
                 idx += 1;
                 continue;
@@ -473,7 +430,7 @@ impl Agent {
             let batch = &tool_calls[batch_start..idx];
             let futures: Vec<_> = batch
                 .iter()
-                .map(|call| self.execute_with_confirm(&tool_map, call))
+                .map(|call| self.execute_with_timeout(&tool_map, call))
                 .collect();
             let results = futures::future::join_all(futures).await;
             for (call, result) in batch.iter().zip(results) {
@@ -490,30 +447,24 @@ impl Agent {
         max_iterations: usize,
     ) {
         let output = if result.output.len() > self.config.max_tool_output_chars {
-            if self.has_subagent {
-                let path = std::env::temp_dir().join(format!("zerda-tool-{}.txt", Uuid::new_v4()));
-                match std::fs::write(&path, &result.output) {
-                    Ok(()) => {
-                        let len = result.output.len();
-                        self.temp_files.push(path.clone());
-                        format!(
-                            "[Tool output too large ({len} chars), saved to {path}. \
-                             Use `shell` with grep/head/tail to search or extract specific sections, \
-                             or use `subagent` with this file_path to read and process the full content.]",
-                            path = path.display()
-                        )
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to save tool output to temp file: {e}");
-                        result
-                            .output
-                            .truncate_for_ui(self.config.max_tool_output_chars)
-                    }
+            let path = std::env::temp_dir().join(format!("zerda-tool-{}.txt", Uuid::new_v4()));
+            match std::fs::write(&path, &result.output) {
+                Ok(()) => {
+                    let len = result.output.len();
+                    self.temp_files.push(path.clone());
+                    format!(
+                        "[Tool output too large ({len} chars), saved to {path}. \
+                         Use `shell` with grep/head/tail to search or extract specific sections, \
+                         or use `subagent` with this file_path to read and process the full content.]",
+                        path = path.display()
+                    )
                 }
-            } else {
-                result
-                    .output
-                    .truncate_for_ui(self.config.max_tool_output_chars)
+                Err(e) => {
+                    tracing::warn!("Failed to save tool output to temp file: {e}");
+                    result
+                        .output
+                        .truncate_for_ui(self.config.max_tool_output_chars)
+                }
             }
         } else {
             result.output
@@ -563,10 +514,6 @@ impl Agent {
             "Auto-compact triggered"
         );
 
-        if self.compression_provider.is_none() {
-            anyhow::bail!("History exceeds max_history but no compression provider configured");
-        }
-
         self.compress_with_llm(memory_dir).await?;
         Ok(true)
     }
@@ -612,10 +559,7 @@ impl Agent {
             "Saved full transcript before compaction"
         );
 
-        let (comp_provider, comp_opts) = self
-            .compression_provider
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No compression provider configured"))?;
+        let (comp_provider, comp_opts) = &self.compression_provider;
 
         let prompt = format!(
             "Summarize this conversation into concise context for future turns. \
@@ -713,27 +657,11 @@ impl Agent {
         sanitized
     }
 
-    async fn execute_with_confirm(
+    async fn execute_with_timeout(
         &self,
         tool_map: &HashMap<&str, &dyn Tool>,
         call: &ToolCall,
     ) -> ToolResult {
-        if self.config.confirm_tools.contains(&call.name) {
-            if let Some(ref confirm) = self.confirm_fn {
-                let name = call.name.clone();
-                let args = call.arguments.clone();
-                let confirm = Arc::clone(confirm);
-                let allow = tokio::task::spawn_blocking(move || (confirm)(&name, &args))
-                    .await
-                    .unwrap_or(false);
-                if !allow {
-                    return ToolResult {
-                        output: "Tool execution denied by user.".to_string(),
-                        is_error: true,
-                    };
-                }
-            }
-        }
         let fut = execute_tool(tool_map, call);
         let timeout_secs = self.config.tool_timeout;
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {

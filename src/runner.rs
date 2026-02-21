@@ -43,6 +43,7 @@ pub struct HotState {
     pub cfg: Config,
     pub builtin_count: usize,
     pub chat_opts: ChatOptions,
+    pub compression_provider: (Arc<dyn providers::Provider>, ChatOptions),
 }
 
 pub(crate) fn refresh_prompt(
@@ -198,20 +199,9 @@ fn provider_config_equal(a: &config::ProviderConfig, b: &config::ProviderConfig)
         && retry_config_equal(&a.retry, &b.retry)
 }
 
-fn compression_model_equal(
-    a: &Option<config::CompressionModelConfig>,
-    b: &Option<config::CompressionModelConfig>,
-) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => provider_config_equal(&x.provider, &y.provider),
-        _ => false,
-    }
-}
-
-fn subagent_config_equal(
-    a: &Option<config::SubAgentConfig>,
-    b: &Option<config::SubAgentConfig>,
+fn fast_model_equal(
+    a: &Option<config::FastModelConfig>,
+    b: &Option<config::FastModelConfig>,
 ) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -274,23 +264,17 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     if old_cfg.agent.max_memory_tokens != new_cfg.agent.max_memory_tokens {
         blockers.push("agent.max_memory_tokens".to_string());
     }
-    if !compression_model_equal(
-        &old_cfg.agent.compression_model,
-        &new_cfg.agent.compression_model,
+    if !fast_model_equal(
+        &old_cfg.agent.fast_model,
+        &new_cfg.agent.fast_model,
     ) {
-        blockers.push("agent.compression_model".to_string());
-    }
-    if !subagent_config_equal(&old_cfg.agent.subagent, &new_cfg.agent.subagent) {
-        blockers.push("agent.subagent".to_string());
+        blockers.push("agent.fast_model".to_string());
     }
     if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
         blockers.push("agent.show_usage".to_string());
     }
     if old_cfg.agent.max_budget_tokens != new_cfg.agent.max_budget_tokens {
         blockers.push("agent.max_budget_tokens".to_string());
-    }
-    if old_cfg.agent.confirm_tools != new_cfg.agent.confirm_tools {
-        blockers.push("agent.confirm_tools".to_string());
     }
     if old_cfg.agent.max_memory_file_size != new_cfg.agent.max_memory_file_size {
         blockers.push("agent.max_memory_file_size".to_string());
@@ -476,7 +460,6 @@ pub async fn run_interactive(
 }
 
 pub async fn run_serve(
-    agent: &mut agent::Agent,
     ctx: &RunContext<'_>,
     hot: &mut HotState,
     sessions_dir: &std::path::Path,
@@ -506,8 +489,6 @@ pub async fn run_serve(
     let mut pending: Vec<channels::ChannelMessage> = Vec::new();
     let mut session_agents: HashMap<String, agent::Agent> = HashMap::new();
     let mut session_recipients: HashMap<String, String> = HashMap::new();
-    let has_subagent = agent.has_subagent();
-    let confirm_fn = agent.confirm_fn();
 
     let memory_dir = config::resolve_path(config::MEMORY_DIR);
     let reload_marker = memory_dir.join(".reload-pending");
@@ -532,11 +513,10 @@ pub async fn run_serve(
                         if let Some(existing) = session_agents.remove(&session_key) {
                             existing
                         } else {
-                            let mut fresh = agent::Agent::new(hot.cfg.agent.clone());
-                            fresh.set_has_subagent(has_subagent);
-                            if let Some(ref confirm) = confirm_fn {
-                                fresh.set_confirm_fn(Arc::clone(confirm));
-                            }
+                            let mut fresh = agent::Agent::new(
+                                hot.cfg.agent.clone(),
+                                (Arc::clone(&hot.compression_provider.0), hot.compression_provider.1.clone()),
+                            );
                             if let Ok((loaded_id, history)) =
                                 agent::Agent::load_session(sessions_dir, Some(&storage_id))
                             {
@@ -646,11 +626,10 @@ pub async fn run_serve(
         let mut session_agent = if let Some(existing) = session_agents.remove(&session_key) {
             existing
         } else {
-            let mut fresh = agent::Agent::new(hot.cfg.agent.clone());
-            fresh.set_has_subagent(has_subagent);
-            if let Some(ref confirm) = confirm_fn {
-                fresh.set_confirm_fn(Arc::clone(confirm));
-            }
+            let mut fresh = agent::Agent::new(
+                hot.cfg.agent.clone(),
+                (Arc::clone(&hot.compression_provider.0), hot.compression_provider.1.clone()),
+            );
             if let Ok((loaded_id, history)) =
                 agent::Agent::load_session(sessions_dir, Some(&storage_id))
             {

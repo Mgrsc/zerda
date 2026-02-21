@@ -5,7 +5,6 @@
     clippy::cast_precision_loss
 )]
 
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -114,42 +113,29 @@ async fn main() -> Result<()> {
             stt::create_stt_provider(&cfg.stt)
         });
 
-    let subagent_provider: Option<(
+    let fast_model_provider: (
         std::sync::Arc<dyn providers::Provider>,
         providers::ChatOptions,
-    )> = {
-        if let Some(ref sa_cfg) = cfg.agent.subagent {
-            match providers::create_provider(&sa_cfg.provider) {
-                Ok(p) => {
-                    let mut opts = providers::ChatOptions::from_provider_config(&sa_cfg.provider);
-                    opts.max_tokens = 4096;
-                    Some((Arc::from(p), opts))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create subagent provider: {e}");
-                    None
-                }
+    ) = if let Some(ref fm_cfg) = cfg.agent.fast_model {
+        match providers::create_provider(&fm_cfg.provider) {
+            Ok(p) => {
+                let opts = providers::ChatOptions::from_provider_config(&fm_cfg.provider);
+                (Arc::from(p), opts)
             }
-        } else if let Some(ref comp_cfg) = cfg.agent.compression_model {
-            match providers::create_provider(&comp_cfg.provider) {
-                Ok(p) => {
-                    let mut opts = providers::ChatOptions::from_provider_config(&comp_cfg.provider);
-                    opts.max_tokens = 4096;
-                    Some((Arc::from(p), opts))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to create subagent provider from compression_model: {e}"
-                    );
-                    None
-                }
+            Err(e) => {
+                tracing::warn!("Failed to create fast_model provider, falling back to main provider: {e}");
+                let p = providers::create_provider(&cfg.provider)
+                    .expect("main provider already validated");
+                (Arc::from(p), chat_opts.clone())
             }
-        } else {
-            None
         }
+    } else {
+        let p = providers::create_provider(&cfg.provider)
+            .expect("main provider already validated");
+        (Arc::from(p), chat_opts.clone())
     };
 
-    let has_subagent = subagent_provider.is_some();
+    let subagent_provider = (Arc::clone(&fast_model_provider.0), fast_model_provider.1.clone());
 
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
@@ -162,7 +148,7 @@ async fn main() -> Result<()> {
         tts_provider,
         skills: Arc::clone(&shared_skills),
         skill_cache: Arc::clone(&skill_cache),
-        subagent_provider,
+        subagent_provider: Some(subagent_provider),
     };
     let mut all_tools = tools::builtin_tools((tools_runtime, tools_dependencies).into());
 
@@ -180,26 +166,9 @@ async fn main() -> Result<()> {
     let system_prompt =
         prompt::build_system_prompt(identity_text.as_deref(), None);
 
-    let mut agent = agent::Agent::new(cfg.agent.clone());
-    agent.set_has_subagent(has_subagent);
+    let compression_provider = (fast_model_provider.0, fast_model_provider.1);
+    let mut agent = agent::Agent::new(cfg.agent.clone(), (Arc::clone(&compression_provider.0), compression_provider.1.clone()));
     agent.set_system_prompt(system_prompt);
-
-    if !cfg.agent.confirm_tools.is_empty() {
-        agent.set_confirm_fn(Arc::new(|name, args| {
-            let preview = serde_json::to_string_pretty(args).unwrap_or_default();
-            eprint!("\n[confirm] Tool `{name}` with args:\n{preview}\nAllow? [y/N] ");
-            if let Err(e) = std::io::stderr().flush() {
-                tracing::warn!("Failed to flush confirmation prompt: {e}");
-                return false;
-            }
-            let mut input = String::new();
-            if let Err(e) = std::io::stdin().read_line(&mut input) {
-                tracing::warn!("Failed to read confirmation input: {e}");
-                return false;
-            }
-            matches!(input.trim(), "y" | "Y" | "yes")
-        }));
-    }
 
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
@@ -220,6 +189,7 @@ async fn main() -> Result<()> {
         cfg,
         builtin_count,
         chat_opts,
+        compression_provider,
     };
 
     match cli.command {
@@ -245,7 +215,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Serve) => {
-            runner::run_serve(&mut agent, &run_ctx, &mut hot, &sessions_dir).await?;
+            runner::run_serve(&run_ctx, &mut hot, &sessions_dir).await?;
         }
         None => {
             runner::run_interactive(&mut agent, &run_ctx, &mut hot, &sessions_dir).await?;

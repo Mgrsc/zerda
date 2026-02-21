@@ -112,14 +112,11 @@ pub struct AgentConfig {
     pub max_memory_tokens: usize,
     #[serde(default = "default_identity_path")]
     pub identity_path: String,
-    pub compression_model: Option<CompressionModelConfig>,
-    pub subagent: Option<SubAgentConfig>,
+    pub fast_model: Option<FastModelConfig>,
     #[serde(default)]
     pub show_usage: bool,
     #[serde(default)]
     pub max_budget_tokens: Option<u64>,
-    #[serde(default)]
-    pub confirm_tools: Vec<String>,
     #[serde(default = "default_max_memory_file_size")]
     pub max_memory_file_size: u64,
     #[serde(default = "default_session_cleanup_days")]
@@ -143,7 +140,7 @@ const fn default_max_memory_tokens() -> usize {
     2000
 }
 fn default_identity_path() -> String {
-    "identity.md".to_string()
+    "~/.zerda/identity.md".to_string()
 }
 const fn default_max_memory_file_size() -> u64 {
     102_400
@@ -156,13 +153,7 @@ const fn default_tool_timeout() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CompressionModelConfig {
-    #[serde(flatten)]
-    pub provider: ProviderConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SubAgentConfig {
+pub struct FastModelConfig {
     #[serde(flatten)]
     pub provider: ProviderConfig,
 }
