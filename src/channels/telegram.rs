@@ -11,6 +11,9 @@ use crate::providers::ContentPart;
 use crate::rich_content::{self, RichSegment};
 use crate::stt::SttProvider;
 
+const POLLING_TIMEOUT: u64 = 30;
+const SPLIT_DELAY_MS: u64 = 100;
+
 fn split_message(message: &str, max_len: usize) -> Vec<String> {
     let max_len = max_len.max(1);
     if message.is_empty() {
@@ -157,16 +160,14 @@ fn normalize_telegram_markdown(text: &str) -> String {
     let mut i = 0usize;
     while i < text.len() {
         let rest = &text[i..];
-        if rest.starts_with("```") {
-            let after_open = &rest[3..];
+        if let Some(after_open) = rest.strip_prefix("```") {
             if let Some(close_offset) = find_closing_code_fence(after_open) {
                 out.push_str(&rest[..3 + close_offset + 3]);
                 i += 3 + close_offset + 3;
                 continue;
             }
         }
-        if rest.starts_with('`') {
-            let after_tick = &rest[1..];
+        if let Some(after_tick) = rest.strip_prefix('`') {
             if let Some(close_offset) = after_tick.find('`') {
                 out.push_str(&rest[..2 + close_offset]);
                 i += 2 + close_offset;
@@ -327,8 +328,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
     while i < text.len() {
         let rest = &text[i..];
 
-        if rest.starts_with("```") {
-            let after_open = &rest[3..];
+        if let Some(after_open) = rest.strip_prefix("```") {
             if let Some(close_offset) = find_closing_code_fence(after_open) {
                 let content = &after_open[..close_offset];
                 out.push_str("```");
@@ -341,8 +341,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             }
         }
 
-        if rest.starts_with('`') {
-            let after_tick = &rest[1..];
+        if let Some(after_tick) = rest.strip_prefix('`') {
             if let Some(close_offset) = after_tick.find('`') {
                 let content = &after_tick[..close_offset];
                 if !content.is_empty() && !content.contains('\n') {
@@ -357,8 +356,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             }
         }
 
-        if rest.starts_with("||") {
-            let after_open = &rest[2..];
+        if let Some(after_open) = rest.strip_prefix("||") {
             if let Some(close_offset) = after_open.find("||") {
                 let content = &after_open[..close_offset];
                 if !content.is_empty() && !content.contains('\n') {
@@ -399,7 +397,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             continue;
         }
 
-        let prev_is_word = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '_');
+        let prev_is_word = prev_char.is_some_and(|c| c.is_alphanumeric() || c == '_');
         if !prev_is_word && rest.starts_with("__") {
             let after_open = &rest[2..];
             if let Some(close_offset) = after_open.find("__") {
@@ -416,7 +414,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             }
         }
 
-        let prev_is_word = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '_');
+        let prev_is_word = prev_char.is_some_and(|c| c.is_alphanumeric() || c == '_');
         if !prev_is_word {
             if let Some(inner) = rest.strip_prefix('_').and_then(|t| {
                 t.find('_').map(|end| &t[..end]).filter(|t| {
@@ -433,7 +431,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             }
         }
 
-        let prev_is_tilde = prev_char.map_or(false, |c| c.is_alphanumeric() || c == '~');
+        let prev_is_tilde = prev_char.is_some_and(|c| c.is_alphanumeric() || c == '~');
         if !prev_is_tilde {
             if let Some(inner) = rest.strip_prefix('~').and_then(|t| {
                 t.find('~').map(|end| &t[..end]).filter(|t| {
@@ -502,8 +500,6 @@ pub struct TelegramChannel {
     client: reqwest::Client,
     stt_provider: Option<Arc<dyn SttProvider>>,
     max_message_length: usize,
-    polling_timeout: u64,
-    split_delay_ms: u64,
 }
 
 impl TelegramChannel {
@@ -531,22 +527,12 @@ impl TelegramChannel {
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(4096)
             .max(1);
-        let polling_timeout = params
-            .get("polling_timeout")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(30);
-        let split_delay_ms = params
-            .get("split_delay_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100);
         Ok(Self {
             token,
             allowed_users,
             client: reqwest::Client::new(),
             stt_provider,
             max_message_length,
-            polling_timeout,
-            split_delay_ms,
         })
     }
 
@@ -615,7 +601,7 @@ impl TelegramChannel {
             }
 
             if i < chunks.len() - 1 {
-                tokio::time::sleep(std::time::Duration::from_millis(self.split_delay_ms)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(SPLIT_DELAY_MS)).await;
             }
         }
         Ok(())
@@ -986,7 +972,7 @@ impl Channel for TelegramChannel {
             let url = self.api_url("getUpdates");
             let body = serde_json::json!({
                 "offset": offset,
-                "timeout": self.polling_timeout,
+                "timeout": POLLING_TIMEOUT,
                 "allowed_updates": ["message"]
             });
 

@@ -91,15 +91,15 @@ async fn main() -> Result<()> {
     let provider = providers::create_provider(&cfg.provider)?;
     let chat_opts = providers::ChatOptions::from_provider_config(&cfg.provider);
 
-    let memory_dir = config::resolve_path(&cfg.agent.memory_dir);
-    let mem = Arc::new(memory::Memory::new(memory_dir));
+    let memory_dir = config::resolve_path(config::MEMORY_DIR);
+    let mem = Arc::new(memory::Memory::new(memory_dir.join("memory")));
     mem.ensure_dirs()?;
     mem.check_memory_size(cfg.agent.max_memory_file_size);
 
     let reload_signal = tools::reload::ReloadSignal::default();
     let max_memory_chars = cfg.agent.max_memory_tokens * 4;
 
-    let skills_dir = config::resolve_path(&cfg.agent.memory_dir).join("skills");
+    let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
     let skills_list = skills::load_skills(&skills_dir);
     let shared_skills = Arc::new(tokio::sync::RwLock::new(skills_list.clone()));
     let skill_cache = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let has_subagent = subagent_provider.is_some();
 
     let tools_runtime = tools::BuiltinToolsRuntime {
-        shell_timeout: cfg.agent.shell_timeout,
+        tool_timeout: cfg.agent.tool_timeout,
         max_memory_chars,
         config_path: cli.config.clone(),
         reload_signal: reload_signal.clone(),
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
     };
 
     let system_prompt =
-        prompt::build_system_prompt(identity_text.as_deref(), None, cfg.agent.max_prompt_chars);
+        prompt::build_system_prompt(identity_text.as_deref(), None);
 
     let mut agent = agent::Agent::new(cfg.agent.clone());
     agent.set_has_subagent(has_subagent);
@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
         }));
     }
 
-    let sessions_dir = config::resolve_path(&cfg.agent.memory_dir).join("sessions");
+    let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
     let run_ctx = runner::RunContext {
         provider: provider.as_ref(),

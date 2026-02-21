@@ -1,5 +1,7 @@
 use std::sync::LazyLock;
 
+use crate::config;
+
 struct EnvInfo {
     os: String,
     shell: String,
@@ -15,7 +17,6 @@ static ENV_INFO: LazyLock<EnvInfo> = LazyLock::new(|| EnvInfo {
 pub fn build_system_prompt(
     identity: Option<&str>,
     channel_supplement: Option<&str>,
-    max_prompt_chars: usize,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -64,9 +65,10 @@ pub fn build_system_prompt(
 
     let prompt = parts.join("\n\n");
     tracing::debug!("System prompt size: {} chars", prompt.len());
-    if prompt.len() > max_prompt_chars {
+    if prompt.len() > config::MAX_PROMPT_CHARS {
         tracing::warn!(
-            "System prompt exceeds {max_prompt_chars} chars ({} chars)",
+            "System prompt exceeds {} chars ({} chars)",
+            config::MAX_PROMPT_CHARS,
             prompt.len()
         );
     }

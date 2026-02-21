@@ -497,9 +497,10 @@ impl Agent {
                         let len = result.output.len();
                         self.temp_files.push(path.clone());
                         format!(
-                            "[Tool output too large ({len} chars), saved to {}. \
-                             Use the `subagent` tool with this file_path to read and process the content.]",
-                            path.display()
+                            "[Tool output too large ({len} chars), saved to {path}. \
+                             Use `shell` with grep/head/tail to search or extract specific sections, \
+                             or use `subagent` with this file_path to read and process the full content.]",
+                            path = path.display()
                         )
                     }
                     Err(e) => {
@@ -596,7 +597,7 @@ impl Agent {
             let _ = writeln!(transcript, "{role_str}: {text}");
         }
 
-        let compaction_dir = memory_dir.join("compaction");
+        let compaction_dir = memory_dir.join("memory").join("compaction");
         std::fs::create_dir_all(&compaction_dir)?;
         let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -610,12 +611,6 @@ impl Agent {
             path = %compaction_path.display(),
             "Saved full transcript before compaction"
         );
-
-        if transcript.len() > self.config.compression_transcript_max_chars {
-            transcript.truncate(
-                transcript.floor_char_boundary(self.config.compression_transcript_max_chars),
-            );
-        }
 
         let (comp_provider, comp_opts) = self
             .compression_provider
@@ -740,16 +735,13 @@ impl Agent {
             }
         }
         let fut = execute_tool(tool_map, call);
-        if let Some(timeout_secs) = self.config.tool_timeout {
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
-                Ok(result) => result,
-                Err(_) => ToolResult {
-                    output: format!("Tool '{}' timed out after {timeout_secs}s", call.name),
-                    is_error: true,
-                },
-            }
-        } else {
-            fut.await
+        let timeout_secs = self.config.tool_timeout;
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
+            Ok(result) => result,
+            Err(_) => ToolResult {
+                output: format!("Tool '{}' timed out after {timeout_secs}s", call.name),
+                is_error: true,
+            },
         }
     }
 

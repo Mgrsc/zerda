@@ -53,7 +53,6 @@ pub(crate) fn refresh_prompt(
     let system_prompt = build_system_prompt(
         hot.identity_text.as_deref(),
         channel_supplement,
-        hot.cfg.agent.max_prompt_chars,
     );
     agent.set_system_prompt(system_prompt);
 }
@@ -173,7 +172,7 @@ async fn post_turn(agent: &mut agent::Agent, hot: &HotState) -> BudgetStatus {
         }
     }
 
-    if let Err(e) = agent.auto_compact(&config::resolve_path(&hot.cfg.agent.memory_dir)).await {
+    if let Err(e) = agent.auto_compact(&config::resolve_path(config::MEMORY_DIR)).await {
         tracing::warn!("Auto-compact failed: {e}");
     }
     BudgetStatus::Ok
@@ -275,9 +274,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     if old_cfg.agent.max_memory_tokens != new_cfg.agent.max_memory_tokens {
         blockers.push("agent.max_memory_tokens".to_string());
     }
-    if old_cfg.agent.memory_dir != new_cfg.agent.memory_dir {
-        blockers.push("agent.memory_dir".to_string());
-    }
     if !compression_model_equal(
         &old_cfg.agent.compression_model,
         &new_cfg.agent.compression_model,
@@ -286,9 +282,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     }
     if !subagent_config_equal(&old_cfg.agent.subagent, &new_cfg.agent.subagent) {
         blockers.push("agent.subagent".to_string());
-    }
-    if old_cfg.agent.shell_timeout != new_cfg.agent.shell_timeout {
-        blockers.push("agent.shell_timeout".to_string());
     }
     if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
         blockers.push("agent.show_usage".to_string());
@@ -304,14 +297,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     }
     if old_cfg.agent.session_cleanup_days != new_cfg.agent.session_cleanup_days {
         blockers.push("agent.session_cleanup_days".to_string());
-    }
-    if old_cfg.agent.compression_transcript_max_chars
-        != new_cfg.agent.compression_transcript_max_chars
-    {
-        blockers.push("agent.compression_transcript_max_chars".to_string());
-    }
-    if old_cfg.agent.stream_overflow_chars != new_cfg.agent.stream_overflow_chars {
-        blockers.push("agent.stream_overflow_chars".to_string());
     }
     if old_cfg.agent.tool_timeout != new_cfg.agent.tool_timeout {
         blockers.push("agent.tool_timeout".to_string());
@@ -347,7 +332,7 @@ async fn perform_light_reload(
             let mcp_count = mcp_tools.len();
             hot.tools.extend(mcp_tools);
 
-            let skills_dir = config::resolve_path(&hot.cfg.agent.memory_dir).join("skills");
+            let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
             hot.skills = skills::load_skills(&skills_dir);
             *hot.shared_skills.write().await = hot.skills.clone();
             hot.skill_cache.write().await.clear();
@@ -368,7 +353,6 @@ async fn perform_light_reload(
 
             hot.cfg.mcp = new_cfg.mcp.clone();
             hot.cfg.agent.identity_path = new_cfg.agent.identity_path.clone();
-            hot.cfg.agent.max_prompt_chars = new_cfg.agent.max_prompt_chars;
 
             refresh_prompt(agent, hot, channel_supplement);
 
@@ -401,7 +385,7 @@ async fn check_reload(
 }
 
 async fn refresh_skills(hot: &mut HotState) {
-    let skills_dir = config::resolve_path(&hot.cfg.agent.memory_dir).join("skills");
+    let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
     hot.skills = skills::load_skills(&skills_dir);
     *hot.shared_skills.write().await = hot.skills.clone();
     hot.skill_cache.write().await.clear();
@@ -525,7 +509,7 @@ pub async fn run_serve(
     let has_subagent = agent.has_subagent();
     let confirm_fn = agent.confirm_fn();
 
-    let memory_dir = config::resolve_path(&hot.cfg.agent.memory_dir);
+    let memory_dir = config::resolve_path(config::MEMORY_DIR);
     let reload_marker = memory_dir.join(".reload-pending");
     let reply_ctx_path = memory_dir.join(".reply-context");
     if reload_marker.exists() {
@@ -644,7 +628,7 @@ pub async fn run_serve(
             "Turn start"
         );
 
-        let memory_dir = config::resolve_path(&hot.cfg.agent.memory_dir);
+        let memory_dir = config::resolve_path(config::MEMORY_DIR);
         let reply_target = ReplyTarget::Unicast {
             channel: channel_name.clone(),
             sender: sender.clone(),
@@ -809,7 +793,7 @@ pub async fn run_serve(
                 let mut guard = stream_buf.lock().unwrap();
                 guard.text.push_str(delta);
                 guard.dirty = true;
-                if guard.text.len() > hot.cfg.agent.stream_overflow_chars {
+                if guard.text.len() > config::STREAM_OVERFLOW_CHARS {
                     guard.overflow = true;
                 }
             })

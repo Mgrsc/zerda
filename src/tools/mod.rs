@@ -50,7 +50,7 @@ pub trait Tool: Send + Sync {
 use crate::providers::{ChatOptions, Provider};
 
 pub struct BuiltinToolsRuntime {
-    pub shell_timeout: u64,
+    pub tool_timeout: u64,
     pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
@@ -65,7 +65,7 @@ pub struct BuiltinToolsDependencies {
 }
 
 pub struct BuiltinToolsContext {
-    pub shell_timeout: u64,
+    pub tool_timeout: u64,
     pub memory: Arc<Memory>,
     pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
@@ -79,7 +79,7 @@ pub struct BuiltinToolsContext {
 impl BuiltinToolsContext {
     pub fn new(runtime: BuiltinToolsRuntime, dependencies: BuiltinToolsDependencies) -> Self {
         Self {
-            shell_timeout: runtime.shell_timeout,
+            tool_timeout: runtime.tool_timeout,
             memory: dependencies.memory,
             max_memory_chars: runtime.max_memory_chars,
             config_path: runtime.config_path,
@@ -100,7 +100,7 @@ impl From<(BuiltinToolsRuntime, BuiltinToolsDependencies)> for BuiltinToolsConte
 
 pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
     let BuiltinToolsContext {
-        shell_timeout,
+        tool_timeout,
         memory,
         max_memory_chars,
         config_path,
@@ -112,7 +112,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
     } = ctx;
 
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(shell::ShellTool::new(shell_timeout)),
+        Box::new(shell::ShellTool::new(tool_timeout)),
         Box::new(read::ReadTool),
         Box::new(write::WriteTool),
         Box::new(reload::ReloadTool::new(config_path, reload_signal)),
@@ -127,7 +127,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
         tools.push(Box::new(subagent::SubAgentTool::new(
             provider,
             chat_opts,
-            shell_timeout,
+            tool_timeout,
         )));
     }
     tools

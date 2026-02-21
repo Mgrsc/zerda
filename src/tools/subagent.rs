@@ -20,20 +20,20 @@ const MAX_TOKENS: u32 = 4096;
 pub struct SubAgentTool {
     provider: Arc<dyn Provider>,
     chat_opts: ChatOptions,
-    shell_timeout: u64,
+    tool_timeout: u64,
 }
 
 impl SubAgentTool {
     pub fn new(
         provider: Arc<dyn Provider>,
         mut chat_opts: ChatOptions,
-        shell_timeout: u64,
+        tool_timeout: u64,
     ) -> Self {
         chat_opts.max_tokens = MAX_TOKENS;
         Self {
             provider,
             chat_opts,
-            shell_timeout,
+            tool_timeout,
         }
     }
 }
@@ -87,7 +87,7 @@ impl Tool for SubAgentTool {
         };
 
         let inner_tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(ShellTool::new(self.shell_timeout)),
+            Box::new(ShellTool::new(self.tool_timeout)),
             Box::new(ReadTool),
         ];
         let tool_specs: Vec<ToolSpec> = inner_tools.iter().map(|t| t.spec()).collect();

@@ -87,8 +87,8 @@ impl Tool for ReloadTool {
                 }),
             },
             "full" => match config_result {
-                Ok(cfg) => {
-                    let memory_dir = crate::config::resolve_path(&cfg.agent.memory_dir);
+                Ok(_cfg) => {
+                    let memory_dir = crate::config::resolve_path(crate::config::MEMORY_DIR);
                     if let Err(e) = std::fs::write(memory_dir.join(".reload-pending"), "") {
                         tracing::warn!("Failed to write reload marker: {e}");
                     }

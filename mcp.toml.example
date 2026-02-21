@@ -3,6 +3,8 @@ name = "filesystem"
 transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed-directory"]
+[mcp.env]
+API_KEY = "${MCP_API_KEY}"
 
 [[mcp]]
 name = "remote-example"

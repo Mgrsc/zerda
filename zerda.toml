@@ -1,9 +1,13 @@
+# Minimal zerda configuration.
+# ${VAR} syntax expands environment variables at load time.
+
 [provider]
-name = "openai_chat"
+name = "openai_chat" # openai_chat | openai_responses | anthropic
 api_key = "${OPENAI_API_KEY}"
 model = "${OPENAI_MODEL}"
 
+# Optional compression model used for history summarization.
 [agent.compression_model]
-name = "openai_chat"
+name = "openai_chat" # openai_chat | openai_responses | anthropic
 api_key = "${OPENAI_API_KEY}"
 model = "${OPENAI_COMPRESSION_MODEL}"

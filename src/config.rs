@@ -6,6 +6,10 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 
+pub const STREAM_OVERFLOW_CHARS: usize = 4000;
+pub const MAX_PROMPT_CHARS: usize = 32000;
+pub const MEMORY_DIR: &str = "~/.zerda";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub provider: ProviderConfig,
@@ -108,12 +112,8 @@ pub struct AgentConfig {
     pub max_memory_tokens: usize,
     #[serde(default = "default_identity_path")]
     pub identity_path: String,
-    #[serde(default = "default_memory_dir")]
-    pub memory_dir: String,
     pub compression_model: Option<CompressionModelConfig>,
     pub subagent: Option<SubAgentConfig>,
-    #[serde(default = "default_shell_timeout")]
-    pub shell_timeout: u64,
     #[serde(default)]
     pub show_usage: bool,
     #[serde(default)]
@@ -124,20 +124,14 @@ pub struct AgentConfig {
     pub max_memory_file_size: u64,
     #[serde(default = "default_session_cleanup_days")]
     pub session_cleanup_days: u64,
-    #[serde(default = "default_compression_transcript_max_chars")]
-    pub compression_transcript_max_chars: usize,
-    #[serde(default = "default_stream_overflow_chars")]
-    pub stream_overflow_chars: usize,
-    #[serde(default)]
-    pub tool_timeout: Option<u64>,
-    #[serde(default = "default_max_prompt_chars")]
-    pub max_prompt_chars: usize,
+    #[serde(default = "default_tool_timeout")]
+    pub tool_timeout: u64,
 }
 
 const MIN_MAX_ITERATIONS: usize = 10;
 
 const fn default_max_iterations() -> usize {
-    20
+    10
 }
 const fn default_max_history() -> usize {
     30
@@ -151,26 +145,14 @@ const fn default_max_memory_tokens() -> usize {
 fn default_identity_path() -> String {
     "identity.md".to_string()
 }
-fn default_memory_dir() -> String {
-    "~/.zerda".to_string()
-}
-const fn default_shell_timeout() -> u64 {
-    300
-}
 const fn default_max_memory_file_size() -> u64 {
     102_400
 }
 const fn default_session_cleanup_days() -> u64 {
     7
 }
-const fn default_compression_transcript_max_chars() -> usize {
-    12000
-}
-const fn default_stream_overflow_chars() -> usize {
-    4000
-}
-const fn default_max_prompt_chars() -> usize {
-    32000
+const fn default_tool_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize)]
