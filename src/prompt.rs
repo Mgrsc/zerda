@@ -35,7 +35,11 @@ pub fn build_system_prompt(
         - Prefer the shortest path: do not build a perfect solution in one pass; get core results first\n\
         - If a tool fails 2 times in a row, abandon that approach and switch to a simpler alternative or ask the user\n\
         - Before each tool call, confirm it advances the goal; if not, stop and reassess\n\
-        - Do not repeatedly attempt the same approach for the same problem"
+        - Do not repeatedly attempt the same approach for the same problem\n\
+        - Never run long-lived or blocking commands in the foreground (e.g., dev servers, file watchers, tail -f)\n\
+        - For long-running tasks, start them in the background with logs and report PID, log path, stop command, and a health check result\n\
+        - Foreground shell commands must be short-lived and bounded with an explicit timeout\n\
+        - If you are unsure whether a command may block, ask the user before running it"
             .to_string(),
     );
 
