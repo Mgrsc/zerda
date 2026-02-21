@@ -32,6 +32,8 @@ enum CallStrategy<'a, F: Fn(&str)> {
     Streaming { on_text: &'a F },
 }
 
+type AssistantMessageCallback<'a> = Option<&'a dyn Fn(&str, bool)>;
+
 pub struct Agent {
     pub history: Vec<ConversationMessage>,
     pub total_usage: Usage,
@@ -72,7 +74,13 @@ impl Agent {
         tools: &[Box<dyn Tool>],
         opts: &ChatOptions,
     ) -> Result<String> {
-        self.run_turn_inner(provider, tools, opts, CallStrategy::<fn(&str)>::Blocking)
+        self.run_turn_inner(
+            provider,
+            tools,
+            opts,
+            CallStrategy::<fn(&str)>::Blocking,
+            None,
+        )
             .await
     }
 
@@ -82,12 +90,14 @@ impl Agent {
         tools: &[Box<dyn Tool>],
         opts: &ChatOptions,
         on_text: impl Fn(&str),
+        on_assistant_message: impl Fn(&str, bool),
     ) -> Result<String> {
         self.run_turn_inner(
             provider,
             tools,
             opts,
             CallStrategy::Streaming { on_text: &on_text },
+            Some(&on_assistant_message),
         )
         .await
     }
@@ -98,6 +108,7 @@ impl Agent {
         tools: &[Box<dyn Tool>],
         opts: &ChatOptions,
         strategy: CallStrategy<'_, F>,
+        on_assistant_message: AssistantMessageCallback<'_>,
     ) -> Result<String> {
         let tool_specs: Vec<ToolSpec> = tools.iter().map(|t| t.spec()).collect();
 
@@ -127,6 +138,11 @@ impl Agent {
 
             if output.tool_calls.is_empty() && output.parse_errors.is_empty() {
                 let text = output.text.unwrap_or_default();
+                if !text.is_empty() {
+                    if let Some(callback) = on_assistant_message {
+                        callback(&text, false);
+                    }
+                }
                 self.history.push(ConversationMessage {
                     role: Role::Assistant,
                     content: if text.is_empty() {
@@ -178,6 +194,9 @@ impl Agent {
             };
             if let Some(ref text) = text {
                 if !text.is_empty() {
+                    if let Some(callback) = on_assistant_message {
+                        callback(text, true);
+                    }
                     assistant_msg.content.push(ContentPart::Text(text.clone()));
                 }
             }

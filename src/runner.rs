@@ -417,13 +417,19 @@ pub async fn run_interactive(
         prepare_user_turn(agent, hot, ctx.mem, msg.content, msg.content_parts, None);
 
         match agent
-            .run_turn_stream(ctx.provider, &hot.tools, &hot.chat_opts, |delta| {
-                let safe = channels::cli::sanitize_terminal_text(delta);
-                print!("{safe}");
-                if let Err(e) = std::io::stdout().flush() {
-                    tracing::debug!("Failed to flush stream output: {e}");
-                }
-            })
+            .run_turn_stream(
+                ctx.provider,
+                &hot.tools,
+                &hot.chat_opts,
+                |delta| {
+                    let safe = channels::cli::sanitize_terminal_text(delta);
+                    print!("{safe}");
+                    if let Err(e) = std::io::stdout().flush() {
+                        tracing::debug!("Failed to flush stream output: {e}");
+                    }
+                },
+                |_, _| {},
+            )
             .await
         {
             Ok(_) => println!("\n"),
@@ -694,88 +700,54 @@ pub async fn run_serve(
             .instrument(span));
         }
 
-        let buffer = Arc::new(std::sync::Mutex::new(StreamBuffer::default()));
-        let flush_cancel = CancellationToken::new();
-
-        let flush_handle = if let Some(ref ch) = ch {
-            let ch = Arc::clone(ch);
-            let buf = Arc::clone(&buffer);
+        let mut tool_phase_handle = None;
+        let mut tool_phase_buffer = None;
+        let tool_phase_tx = if let Some(ref ch_ref) = ch {
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let ch = Arc::clone(ch_ref);
             let sender = sender.clone();
-            let token = flush_cancel.clone();
-            let typing_token = typing_cancel.clone();
             let span = turn_span.clone();
-            Some(tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                loop {
-                    if token.is_cancelled() {
-                        break;
-                    }
-
-                    let (is_dirty, overflow, snapshot, mid) = {
-                        let mut guard = buf.lock().unwrap();
-                        let dirty = guard.dirty;
-                        let overflow = guard.overflow;
-                        let text = guard.text.clone();
-                        let mid = guard.message_id.clone();
-                        if dirty {
-                            guard.dirty = false;
+            tool_phase_handle = Some(tokio::spawn(
+                async move {
+                    while let Some(message) = rx.recv().await {
+                        if let Err(e) = ch.send(&message, &sender).await {
+                            tracing::warn!("Failed to send tool-phase message: {e}");
                         }
-                        (dirty, overflow, text, mid)
-                    };
-
-                    if !is_dirty {
-                        tokio::select! {
-                            () = token.cancelled() => break,
-                            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
-                        }
-                        continue;
-                    }
-
-                    if overflow {
-                        break;
-                    }
-
-                    let display_text = format!("{snapshot}▌");
-
-                    if let Some(ref mid) = mid {
-                        if let Err(e) = ch.send_stream_update(&sender, mid, &display_text).await {
-                            tracing::debug!(message_id = %mid, "Failed to send stream update: {e}");
-                        }
-                    } else {
-                        match ch.send_stream_start(&sender, &display_text).await {
-                            Ok(Some(id)) => {
-                                buf.lock().unwrap().message_id = Some(id);
-                                typing_token.cancel();
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::warn!("Stream start failed: {e}");
-                                break;
-                            }
-                        }
-                    }
-
-                    tokio::select! {
-                        () = token.cancelled() => break,
-                        () = tokio::time::sleep(std::time::Duration::from_millis(1300)) => {}
                     }
                 }
-            }
-            .instrument(span)))
+                .instrument(span),
+            ));
+            Some(tx)
         } else {
+            tool_phase_buffer = Some(Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
             None
         };
-
-        let stream_buf = Arc::clone(&buffer);
+        let captured_messages = tool_phase_buffer.as_ref().map(Arc::clone);
+        let tool_phase_tx_for_cb = tool_phase_tx.clone();
         let response = match session_agent
-            .run_turn_stream(ctx.provider, &hot.tools, &hot.chat_opts, |delta| {
-                let mut guard = stream_buf.lock().unwrap();
-                guard.text.push_str(delta);
-                guard.dirty = true;
-                if guard.text.len() > config::STREAM_OVERFLOW_CHARS {
-                    guard.overflow = true;
-                }
-            })
+            .run_turn_stream(
+                ctx.provider,
+                &hot.tools,
+                &hot.chat_opts,
+                |_| {},
+                move |text, has_tool_calls| {
+                    if has_tool_calls {
+                        if let Some(message) = normalize_tool_phase_message(text) {
+                            let chars = message.chars().count();
+                            tracing::debug!(chars, "Captured tool-phase assistant content");
+                            if let Some(tx) = &tool_phase_tx_for_cb {
+                                if tx.send(message).is_err() {
+                                    tracing::warn!(
+                                        "Tool-phase sender channel closed before delivery"
+                                    );
+                                }
+                            } else if let Some(buffer) = &captured_messages {
+                                buffer.lock().unwrap().push(message);
+                            }
+                        }
+                    }
+                },
+            )
             .instrument(turn_span.clone())
             .await
         {
@@ -787,53 +759,36 @@ pub async fn run_serve(
         };
 
         typing_cancel.cancel();
-        flush_cancel.cancel();
-        if let Some(handle) = flush_handle {
+        drop(tool_phase_tx);
+        if let Some(handle) = tool_phase_handle {
             if let Err(e) = handle.await {
-                tracing::warn!("Flush task panicked: {e}");
+                tracing::warn!("Tool-phase sender task panicked: {e}");
             }
         }
 
-        let message_id = buffer.lock().unwrap().message_id.clone();
-
         if let Some(ref ch) = ch {
-            if let Some(ref mid) = message_id {
-                let full_text = buffer.lock().unwrap().text.clone();
-                let final_source = if response.is_empty() {
-                    "stream_buffer"
-                } else {
-                    "response"
-                };
-                let final_text = if response.is_empty() {
-                    full_text
-                } else {
-                    response.clone()
-                };
-                tracing::debug!(
-                    final_source,
-                    response_chars = response.chars().count(),
-                    selected_chars = final_text.chars().count(),
-                    "Final stream payload selected"
-                );
-                let clean_text = rich_content::strip_rich_markers(&final_text);
-                if !clean_text.is_empty() {
-                    if let Err(e) = ch.send_stream_update(&sender, mid, &clean_text).await {
-                        tracing::warn!("Final stream edit failed, sending as new message: {e}");
-                        if let Err(send_err) = ch.send(&clean_text, &sender).await {
-                            tracing::warn!("Failed to send fallback final message: {send_err}");
-                        }
-                    }
+            tracing::debug!(
+                final_response_chars = response.chars().count(),
+                "Sending assistant messages"
+            );
+            if let Some(final_message) = normalize_final_message(&response) {
+                if let Err(e) = send_final_message_streamed(ch, &sender, &final_message).await {
+                    tracing::warn!("Failed to send response via {}: {e}", channel_name);
                 }
-                for marker in rich_content::rich_content_markers(&response) {
-                    if let Err(e) = ch.send(&marker, &sender).await {
-                        tracing::warn!("Failed to send rich marker message: {e}");
-                    }
-                }
-            } else if let Err(e) = ch.send(&response, &sender).await {
-                tracing::warn!("Failed to send response via {}: {e}", channel_name);
             }
         } else {
-            println!("{}", channels::cli::sanitize_terminal_text(&response));
+            if let Some(buffer) = tool_phase_buffer {
+                let captured_tool_phase = {
+                    let mut guard = buffer.lock().unwrap();
+                    std::mem::take(&mut *guard)
+                };
+                for message in captured_tool_phase {
+                    println!("{}", channels::cli::sanitize_terminal_text(&message));
+                }
+            }
+            if let Some(final_message) = normalize_final_message(&response) {
+                println!("{}", channels::cli::sanitize_terminal_text(&final_message));
+            }
         }
 
         tracing::info!(
@@ -866,12 +821,95 @@ pub async fn run_serve(
     Ok(())
 }
 
-#[derive(Default)]
-struct StreamBuffer {
-    text: String,
-    dirty: bool,
-    message_id: Option<String>,
-    overflow: bool,
+fn normalize_tool_phase_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let no_trailing_ws = trimmed.trim_end();
+    let no_colon = no_trailing_ws
+        .strip_suffix('：')
+        .or_else(|| no_trailing_ws.strip_suffix(':'))
+        .unwrap_or(no_trailing_ws)
+        .trim_end();
+    if no_colon.is_empty() {
+        None
+    } else {
+        Some(no_colon.to_string())
+    }
+}
+
+fn normalize_final_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_stream_prefixes(text: &str, step_chars: usize) -> Vec<String> {
+    let step = step_chars.max(1);
+    let mut prefixes = Vec::new();
+    let mut acc = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        acc.push(ch);
+        count += 1;
+        if count.is_multiple_of(step) {
+            prefixes.push(acc.clone());
+        }
+    }
+    if prefixes.last() != Some(&acc) {
+        prefixes.push(acc);
+    }
+    prefixes
+}
+
+async fn send_final_message_streamed(
+    channel: &Arc<dyn Channel>,
+    recipient: &str,
+    message: &str,
+) -> Result<()> {
+    let clean_text = rich_content::strip_rich_markers(message);
+    let markers = rich_content::rich_content_markers(message);
+
+    if clean_text.is_empty() {
+        for marker in markers {
+            channel.send(&marker, recipient).await?;
+        }
+        return Ok(());
+    }
+
+    if clean_text.chars().count() > config::STREAM_OVERFLOW_CHARS {
+        channel.send(&clean_text, recipient).await?;
+    } else {
+        let prefixes = build_stream_prefixes(&clean_text, 80);
+        let mut fallback_plain = true;
+        if let Some(first) = prefixes.first() {
+            let start_text = format!("{first}▌");
+            if let Some(message_id) = channel.send_stream_start(recipient, &start_text).await? {
+                fallback_plain = false;
+                for prefix in prefixes.iter().skip(1) {
+                    let update = format!("{prefix}▌");
+                    channel
+                        .send_stream_update(recipient, &message_id, &update)
+                        .await?;
+                }
+                channel
+                    .send_stream_update(recipient, &message_id, &clean_text)
+                    .await?;
+            }
+        }
+        if fallback_plain {
+            channel.send(&clean_text, recipient).await?;
+        }
+    }
+
+    for marker in markers {
+        channel.send(&marker, recipient).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
