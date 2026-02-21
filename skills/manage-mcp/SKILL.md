@@ -16,6 +16,13 @@ Resolve the active `zerda.toml` in this order:
 2. `$ZERDA_CONFIG`
 3. `~/.zerda/zerda.toml`
 
+Path handling rules:
+
+- Always expand `~/` to `$HOME/` before reading or writing files.
+- The default fallback is `$HOME/.zerda/zerda.toml` (never `$HOME/zerda.toml`).
+- Build MCP path strictly as `<parent_dir_of_active_zerda.toml>/mcp.toml`.
+- If both `$HOME/.zerda/zerda.toml` and `$HOME/zerda.toml` exist and no explicit config is provided, prefer `$HOME/.zerda/zerda.toml`.
+
 ## Configuration Format
 
 ### stdio transport
@@ -46,21 +53,23 @@ url = "https://example.com/mcp"
 
 ### List
 
-Read `<config-dir>/mcp.toml` where `<config-dir>` is the directory of the active `zerda.toml`, then display all `[[mcp]]` blocks to the user.
+1. Resolve active `zerda.toml` path using the order above, with `~/` expanded to `$HOME/`.
+2. Compute `<config-dir>` as its parent directory.
+3. Read `<config-dir>/mcp.toml` and display all `[[mcp]]` blocks.
 
 ### Add
 
 You MUST complete these steps in order:
 
-1. Read `mcp.toml` with the `read` tool to get current content. If the file does not exist, start with an empty file.
-2. Use the `write` tool to write the updated `mcp.toml`, appending the new `[[mcp]]` block. Write the COMPLETE file content.
+1. Read `<config-dir>/mcp.toml` with the `read` tool to get current content. If the file does not exist, start with an empty file.
+2. Use the `write` tool to write the updated `<config-dir>/mcp.toml`, appending the new `[[mcp]]` block. Write the COMPLETE file content.
 3. Verify the file was written correctly by reading it back with the `read` tool.
 4. Only after confirming the write succeeded, call the `reload` tool with `mode=light` to apply the new MCP connection.
 
 ### Remove
 
-1. Read `mcp.toml` with the `read` tool to get current content.
-2. Use the `write` tool to write the updated `mcp.toml` with the matching `[[mcp]]` block removed. Write the COMPLETE file content.
+1. Read `<config-dir>/mcp.toml` with the `read` tool to get current content.
+2. Use the `write` tool to write the updated `<config-dir>/mcp.toml` with the matching `[[mcp]]` block removed. Write the COMPLETE file content.
 3. Verify the file was written correctly by reading it back with the `read` tool.
 4. Only after confirming the write succeeded, call the `reload` tool with `mode=light`.
 

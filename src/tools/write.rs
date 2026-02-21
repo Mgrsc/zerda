@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{Tool, ToolResult};
+use crate::config::resolve_path;
 
 const MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -36,10 +37,11 @@ impl Tool for WriteTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let path = args
+        let input_path = args
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = resolve_path(input_path);
 
         let content = args
             .get("content")
@@ -67,14 +69,15 @@ impl Tool for WriteTool {
             });
         }
 
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        tokio::fs::write(path, &content).await?;
+        tokio::fs::write(&path, &content).await?;
+        let path_str = path.display().to_string();
 
         Ok(ToolResult {
-            output: format!("Written {} bytes to {path}", content.len()),
+            output: format!("Written {} bytes to {path_str}", content.len()),
             is_error: false,
         })
     }

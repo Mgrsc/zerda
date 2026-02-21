@@ -6,6 +6,25 @@ description: |
 
 # Manage Skills
 
+## Path Resolution (MUST)
+
+Before install, uninstall, or create operations, resolve the target skills directory from the active `zerda.toml`.
+
+Resolve the active `zerda.toml` in this order:
+
+1. Explicit `--config` path
+2. `$ZERDA_CONFIG`
+3. `~/.zerda/zerda.toml`
+
+Path handling rules:
+
+- Always expand `~/` to `$HOME/` before reading or writing files.
+- The default fallback is `$HOME/.zerda/zerda.toml` (never `$HOME/zerda.toml`).
+- Read `agent.memory_dir` from the active `zerda.toml` and resolve it with `resolve_path` semantics.
+- Build skills path strictly as `<resolve_path(agent.memory_dir)>/skills`.
+- If `agent.memory_dir` is absent, use default `~/.zerda`, so skills path is `$HOME/.zerda/skills`.
+- Do not hardcode container paths or current working directory.
+
 ## Search
 
 Query the skills.sh registry API:
@@ -26,7 +45,7 @@ A skill is a directory containing a `SKILL.md` file. To install from a GitHub re
 OWNER="owner"
 REPO="repo"
 SKILL="skill-name"
-SKILLS_DIR="${SKILLS_DIR:-$HOME/.zerda/skills}"
+SKILLS_DIR="<resolve_path(agent.memory_dir)>/skills"
 TARGET="$SKILLS_DIR/$SKILL"
 
 mkdir -p "$TARGET"
@@ -37,7 +56,7 @@ cp -r skills/"$SKILL"/* "$TARGET"/ 2>/dev/null || cp -r "$SKILL"/* "$TARGET"/
 cd - > /dev/null
 ```
 
-Default skill directory is `~/.zerda/skills`. If `agent.memory_dir` is customized in `zerda.toml`, set `SKILLS_DIR` to `<resolve_path(agent.memory_dir)>/skills` first.
+Default skill directory is `~/.zerda/skills`. Always prefer `<resolve_path(agent.memory_dir)>/skills` from the active `zerda.toml`.
 
 After the files are in place, call the `reload` tool with `mode=light` to activate the new skill. Wait for the system confirmation message before informing the user.
 
@@ -50,11 +69,11 @@ After the files are in place, call the `reload` tool with `mode=light` to activa
 ## Uninstall
 
 ```bash
-SKILLS_DIR="${SKILLS_DIR:-$HOME/.zerda/skills}"
+SKILLS_DIR="<resolve_path(agent.memory_dir)>/skills"
 rm -rf "$SKILLS_DIR/<skill-name>"
 ```
 
-If `agent.memory_dir` is customized, set `SKILLS_DIR` to `<resolve_path(agent.memory_dir)>/skills` first.
+Always set `SKILLS_DIR` to `<resolve_path(agent.memory_dir)>/skills` from the active `zerda.toml`.
 
 After removing the directory, call the `reload` tool with `mode=light` to update the skill index.
 

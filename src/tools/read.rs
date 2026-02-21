@@ -4,6 +4,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::{Tool, ToolResult};
+use crate::config::resolve_path;
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
 const PREVIEW_HEAD_BYTES: usize = 32 * 1024;
@@ -39,16 +40,18 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let path = args
+        let input_path = args
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = resolve_path(input_path);
+        let path_str = path.display().to_string();
 
-        let metadata = match tokio::fs::metadata(path).await {
+        let metadata = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) => {
                 return Ok(ToolResult {
-                    output: format!("Failed to read metadata for {path}: {e}"),
+                    output: format!("Failed to read metadata for {path_str}: {e}"),
                     is_error: true,
                 });
             }
@@ -56,14 +59,14 @@ impl Tool for ReadTool {
 
         if !metadata.is_file() {
             return Ok(ToolResult {
-                output: format!("Refused to read {path}: not a regular file"),
+                output: format!("Refused to read {path_str}: not a regular file"),
                 is_error: true,
             });
         }
 
         let file_size = metadata.len();
         if file_size > MAX_READ_BYTES {
-            match read_preview(path, file_size).await {
+            match read_preview(&path, file_size).await {
                 Ok(preview) => {
                     return Ok(ToolResult {
                         output: preview,
@@ -72,27 +75,27 @@ impl Tool for ReadTool {
                 }
                 Err(e) => {
                     return Ok(ToolResult {
-                        output: format!("Failed to read preview from {path}: {e}"),
+                        output: format!("Failed to read preview from {path_str}: {e}"),
                         is_error: true,
                     });
                 }
             }
         }
 
-        match tokio::fs::read_to_string(path).await {
+        match tokio::fs::read_to_string(&path).await {
             Ok(contents) => Ok(ToolResult {
                 output: contents,
                 is_error: false,
             }),
             Err(e) => Ok(ToolResult {
-                output: format!("Failed to read {path}: {e}"),
+                output: format!("Failed to read {path_str}: {e}"),
                 is_error: true,
             }),
         }
     }
 }
 
-async fn read_preview(path: &str, file_size: u64) -> Result<String> {
+async fn read_preview(path: &std::path::Path, file_size: u64) -> Result<String> {
     let mut file = tokio::fs::File::open(path).await?;
 
     let mut head = vec![0u8; PREVIEW_HEAD_BYTES.min(file_size as usize)];

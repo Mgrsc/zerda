@@ -48,7 +48,13 @@ All fields are optional. Only `description` is recommended.
 |------|
 | `<resolve_path(agent.memory_dir)>/skills/<skill-name>/SKILL.md` |
 
-Default location is `~/.zerda/skills/<skill-name>/SKILL.md`. If `agent.memory_dir` is customized in `zerda.toml`, use the resolved directory instead.
+Path handling rules:
+
+- Resolve active `zerda.toml` in order: explicit `--config`, `$ZERDA_CONFIG`, then `~/.zerda/zerda.toml`.
+- Always expand `~/` to `$HOME/` before reading or writing files.
+- Read `agent.memory_dir` from the active `zerda.toml` and resolve it with `resolve_path` semantics.
+- Build skill path strictly as `<resolve_path(agent.memory_dir)>/skills/<skill-name>/SKILL.md`.
+- If `agent.memory_dir` is absent, default location is `$HOME/.zerda/skills/<skill-name>/SKILL.md`.
 
 ## Argument Substitution
 
