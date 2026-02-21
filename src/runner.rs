@@ -173,7 +173,7 @@ async fn post_turn(agent: &mut agent::Agent, hot: &HotState) -> BudgetStatus {
         }
     }
 
-    if let Err(e) = agent.auto_compact().await {
+    if let Err(e) = agent.auto_compact(&config::resolve_path(&hot.cfg.agent.memory_dir)).await {
         tracing::warn!("Auto-compact failed: {e}");
     }
     BudgetStatus::Ok
@@ -301,9 +301,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     }
     if old_cfg.agent.max_memory_file_size != new_cfg.agent.max_memory_file_size {
         blockers.push("agent.max_memory_file_size".to_string());
-    }
-    if old_cfg.agent.compression_summary_max_chars != new_cfg.agent.compression_summary_max_chars {
-        blockers.push("agent.compression_summary_max_chars".to_string());
     }
     if old_cfg.agent.session_cleanup_days != new_cfg.agent.session_cleanup_days {
         blockers.push("agent.session_cleanup_days".to_string());

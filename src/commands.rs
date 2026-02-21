@@ -70,7 +70,8 @@ pub async fn try_handle_command(
             "Context cleared.".to_string()
         }
         "compact" => {
-            match agent.compress_with_llm().await {
+            let memory_dir = crate::config::resolve_path(&hot.cfg.agent.memory_dir);
+            match agent.compress_with_llm(&memory_dir).await {
                 Ok(()) => "Context compressed with LLM.".to_string(),
                 Err(e) => format!("Compression failed: {e}"),
             }

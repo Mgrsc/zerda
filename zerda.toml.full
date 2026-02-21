@@ -35,7 +35,6 @@ show_usage = false                      # print token usage after each turn, def
 # max_budget_tokens = 1000000           # session token budget, stop when exceeded, default unlimited
 confirm_tools = []                      # tools requiring manual approval, e.g. ["shell", "write"], default []
 max_memory_file_size = 102400           # max memory file size in bytes, default 102400
-compression_summary_max_chars = 4000    # max chars for compression summary, default 4000
 session_cleanup_days = 7                # auto-delete sessions older than N days, default 7
 compression_transcript_max_chars = 12000 # max original transcript chars kept during compression, default 12000
 stream_overflow_chars = 4000            # streaming overflow buffer chars, default 4000

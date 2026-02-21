@@ -544,7 +544,7 @@ impl Agent {
         ));
     }
 
-    pub async fn auto_compact(&mut self) -> Result<bool> {
+    pub async fn auto_compact(&mut self, memory_dir: &Path) -> Result<bool> {
         let non_system_count = self
             .history
             .iter()
@@ -566,11 +566,11 @@ impl Agent {
             anyhow::bail!("History exceeds max_history but no compression provider configured");
         }
 
-        self.compress_with_llm().await?;
+        self.compress_with_llm(memory_dir).await?;
         Ok(true)
     }
 
-    pub async fn compress_with_llm(&mut self) -> Result<()> {
+    pub async fn compress_with_llm(&mut self, memory_dir: &Path) -> Result<()> {
         let indices_to_compact: Vec<usize> = self
             .history
             .iter()
@@ -595,6 +595,21 @@ impl Agent {
             let text = msg.text_content();
             let _ = writeln!(transcript, "{role_str}: {text}");
         }
+
+        let compaction_dir = memory_dir.join("compaction");
+        std::fs::create_dir_all(&compaction_dir)?;
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let ms = duration.as_millis();
+        let nanos = duration.subsec_nanos();
+        let compaction_path = compaction_dir.join(format!("{ms}-{nanos:08x}.txt"));
+        std::fs::write(&compaction_path, &transcript)?;
+        tracing::info!(
+            summary_kind = "history_compaction",
+            path = %compaction_path.display(),
+            "Saved full transcript before compaction"
+        );
 
         if transcript.len() > self.config.compression_transcript_max_chars {
             transcript.truncate(
@@ -630,12 +645,11 @@ impl Agent {
             anyhow::bail!("Empty compression summary");
         }
 
-        let summary = if summary.len() > self.config.compression_summary_max_chars {
-            summary[..summary.floor_char_boundary(self.config.compression_summary_max_chars)]
-                .to_string()
-        } else {
-            summary
-        };
+        let compaction_hint = format!(
+            "\n\nThe full conversation transcript before compaction was saved to: {path}\n\
+             To retrieve specific details, use the `subagent` tool with file_path or use `shell` with grep/head/tail to search the file. Do NOT read the entire file.",
+            path = compaction_path.display()
+        );
 
         let remove_set: std::collections::HashSet<usize> =
             indices_to_compact.iter().copied().collect();
@@ -646,7 +660,7 @@ impl Agent {
             keep
         });
 
-        self.conversation_summary = Some(summary);
+        self.conversation_summary = Some(format!("{summary}{compaction_hint}"));
 
         tracing::info!(
             summary_kind = "history_compaction",

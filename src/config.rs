@@ -122,8 +122,6 @@ pub struct AgentConfig {
     pub confirm_tools: Vec<String>,
     #[serde(default = "default_max_memory_file_size")]
     pub max_memory_file_size: u64,
-    #[serde(default = "default_compression_summary_max_chars")]
-    pub compression_summary_max_chars: usize,
     #[serde(default = "default_session_cleanup_days")]
     pub session_cleanup_days: u64,
     #[serde(default = "default_compression_transcript_max_chars")]
@@ -161,9 +159,6 @@ const fn default_shell_timeout() -> u64 {
 }
 const fn default_max_memory_file_size() -> u64 {
     102_400
-}
-const fn default_compression_summary_max_chars() -> usize {
-    4000
 }
 const fn default_session_cleanup_days() -> u64 {
     7
