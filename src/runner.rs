@@ -390,6 +390,7 @@ pub async fn run_interactive(
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<channels::ChannelMessage>(32);
     let cli_channel = channels::cli::CliChannel;
+    let mut pending: Vec<channels::ChannelMessage> = Vec::new();
 
     tokio::spawn(async move {
         if let Err(e) = cli_channel.listen(tx).await {
@@ -402,7 +403,16 @@ pub async fn run_interactive(
         tracing::debug!("Failed to flush prompt: {e}");
     }
 
-    while let Some(msg) = rx.recv().await {
+    loop {
+        let msg = if let Some(idx) = pending.iter().position(|_| true) {
+            pending.remove(idx)
+        } else {
+            match rx.recv().await {
+                Some(m) => m,
+                None => break,
+            }
+        };
+
         match commands::try_handle_command(&msg.content, agent, hot, ctx).await {
             commands::CommandResult::Handled(feedback) => {
                 eprintln!("{feedback}");
@@ -414,10 +424,14 @@ pub async fn run_interactive(
             }
             commands::CommandResult::NotACommand => {}
         }
+        let snapshot = agent.snapshot_turn();
         prepare_user_turn(agent, hot, ctx.mem, msg.content, msg.content_parts, None);
 
-        match agent
-            .run_turn_stream(
+        let mut cancelled = false;
+        let mut run_result = None;
+        {
+            let mut rx_closed = false;
+            let run_turn = agent.run_turn_stream(
                 ctx.provider,
                 &hot.tools,
                 &hot.chat_opts,
@@ -429,11 +443,56 @@ pub async fn run_interactive(
                     }
                 },
                 |_, _| {},
-            )
-            .await
-        {
-            Ok(_) => println!("\n"),
-            Err(e) => eprintln!("\nError: {e}\n"),
+            );
+            tokio::pin!(run_turn);
+
+            loop {
+                tokio::select! {
+                    result = &mut run_turn => {
+                        run_result = Some(result);
+                        break;
+                    }
+                    incoming = rx.recv(), if !rx_closed => {
+                        match incoming {
+                            Some(next) => {
+                                if commands::is_cancel_command(&next.content) {
+                                    cancelled = true;
+                                    tracing::info!("Interactive turn cancel requested by user");
+                                eprintln!("\nCurrent turn cancelled\n");
+                                    break;
+                                }
+                                pending.push(next);
+                            }
+                            None => rx_closed = true,
+                        }
+                    }
+                }
+            }
+        }
+
+        if cancelled {
+            agent.restore_turn(snapshot);
+            tracing::info!("Interactive turn cancelled and rolled back");
+            print!("zerda> ");
+            if let Err(e) = std::io::stdout().flush() {
+                tracing::debug!("Failed to flush prompt: {e}");
+            }
+            continue;
+        }
+
+        if let Some(result) = run_result {
+            match result {
+                Ok(_) => println!("\n"),
+                Err(e) => eprintln!("\nError: {e}\n"),
+            }
+        } else {
+            agent.restore_turn(snapshot);
+            eprintln!("\nError: turn did not complete.\n");
+            print!("zerda> ");
+            if let Err(e) = std::io::stdout().flush() {
+                tracing::debug!("Failed to flush prompt: {e}");
+            }
+            continue;
         }
 
         if hot.cfg.agent.show_usage {
@@ -585,8 +644,16 @@ pub async fn run_serve(
         let channel_name = msg.channel;
         let turn_id = Uuid::new_v4().to_string();
         let turn_started = Instant::now();
+        let mut queued_cancel = false;
 
         while let Ok(next) = rx.try_recv() {
+            if next.session_id == session_id
+                && next.channel == channel_name
+                && commands::is_cancel_command(&next.content)
+            {
+                queued_cancel = true;
+                continue;
+            }
             if next.session_id == session_id && next.channel == channel_name {
                 content.push('\n');
                 content.push_str(&next.content);
@@ -668,6 +735,7 @@ pub async fn run_serve(
         }
 
         let supplement = ch.as_ref().and_then(|c| c.prompt_supplement());
+        let snapshot = session_agent.snapshot_turn();
         prepare_user_turn(
             &mut session_agent,
             hot,
@@ -724,39 +792,76 @@ pub async fn run_serve(
         };
         let captured_messages = tool_phase_buffer.as_ref().map(Arc::clone);
         let tool_phase_tx_for_cb = tool_phase_tx.clone();
-        let response = match session_agent
-            .run_turn_stream(
-                ctx.provider,
-                &hot.tools,
-                &hot.chat_opts,
-                |_| {},
-                move |text, has_tool_calls| {
-                    if has_tool_calls {
-                        if let Some(message) = normalize_tool_phase_message(text) {
-                            let chars = message.chars().count();
-                            tracing::debug!(chars, "Captured tool-phase assistant content");
-                            if let Some(tx) = &tool_phase_tx_for_cb {
-                                if tx.send(message).is_err() {
-                                    tracing::warn!(
-                                        "Tool-phase sender channel closed before delivery"
-                                    );
+        let mut cancelled = queued_cancel;
+        let mut rx_closed = false;
+        let mut response = String::new();
+        if !cancelled {
+            let run_turn = session_agent
+                .run_turn_stream(
+                    ctx.provider,
+                    &hot.tools,
+                    &hot.chat_opts,
+                    |_| {},
+                    move |text, has_tool_calls| {
+                        if has_tool_calls {
+                            if let Some(message) = normalize_tool_phase_message(text) {
+                                let chars = message.chars().count();
+                                tracing::debug!(chars, "Captured tool-phase assistant content");
+                                if let Some(tx) = &tool_phase_tx_for_cb {
+                                    if tx.send(message).is_err() {
+                                        tracing::warn!(
+                                            "Tool-phase sender channel closed before delivery"
+                                        );
+                                    }
+                                } else if let Some(buffer) = &captured_messages {
+                                    buffer.lock().unwrap().push(message);
                                 }
-                            } else if let Some(buffer) = &captured_messages {
-                                buffer.lock().unwrap().push(message);
                             }
                         }
+                    },
+                )
+                .instrument(turn_span.clone());
+            tokio::pin!(run_turn);
+
+            loop {
+                tokio::select! {
+                    result = &mut run_turn => {
+                        response = match result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::error!(channel = %channel_name, sender = %sender, "Turn failed: {e}");
+                                format!("Error: {e}")
+                            }
+                        };
+                        break;
                     }
-                },
-            )
-            .instrument(turn_span.clone())
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(channel = %channel_name, sender = %sender, "Turn failed: {e}");
-                format!("Error: {e}")
+                    incoming = rx.recv(), if !rx_closed => {
+                        match incoming {
+                            Some(next) => {
+                                if next.session_id == session_id
+                                    && next.channel == channel_name
+                                    && commands::is_cancel_command(&next.content)
+                                {
+                                    cancelled = true;
+                                    tracing::info!(
+                                        parent: &turn_span,
+                                        "Turn cancel requested by user"
+                                    );
+                                    break;
+                                }
+                                pending.push(next);
+                            }
+                            None => rx_closed = true,
+                        }
+                    }
+                }
             }
-        };
+        } else {
+            tracing::info!(
+                parent: &turn_span,
+                "Turn cancel requested before execution started"
+            );
+        }
 
         typing_cancel.cancel();
         drop(tool_phase_tx);
@@ -764,6 +869,27 @@ pub async fn run_serve(
             if let Err(e) = handle.await {
                 tracing::warn!("Tool-phase sender task panicked: {e}");
             }
+        }
+
+        if cancelled {
+            session_agent.restore_turn(snapshot);
+            if let Some(ref ch) = ch {
+                if let Err(e) = ch.send("Current turn cancelled", &sender).await {
+                    tracing::warn!("Failed to send cancel feedback via {}: {e}", channel_name);
+                }
+            } else {
+                println!("Current turn cancelled");
+            }
+            tracing::info!(
+                parent: &turn_span,
+                elapsed_ms = turn_started.elapsed().as_millis(),
+                "Turn cancelled"
+            );
+            if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
+                tracing::warn!("Failed to save session {storage_id}: {e}");
+            }
+            session_agents.insert(session_key, session_agent);
+            continue;
         }
 
         if let Some(ref ch) = ch {

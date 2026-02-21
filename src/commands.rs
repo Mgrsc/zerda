@@ -33,21 +33,20 @@ const COMMANDS: &[CommandInfo] = &[
         name: "help",
         description: "Show available commands",
     },
+    CommandInfo {
+        name: "cancel",
+        description: "Cancel current running turn",
+    },
 ];
 
 pub fn command_infos() -> &'static [CommandInfo] {
     COMMANDS
 }
 
-pub async fn try_handle_command(
-    input: &str,
-    agent: &mut Agent,
-    hot: &mut HotState,
-    _ctx: &RunContext<'_>,
-) -> CommandResult {
+fn parse_command(input: &str) -> Option<(&str, &str)> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
-        return CommandResult::NotACommand;
+        return None;
     }
 
     let (raw_command, args) = match trimmed.split_once(' ') {
@@ -61,6 +60,25 @@ pub async fn try_handle_command(
         .split('@')
         .next()
         .unwrap_or("");
+
+    Some((command_name, args))
+}
+
+pub fn is_cancel_command(input: &str) -> bool {
+    parse_command(input)
+        .map(|(name, _)| name == "cancel")
+        .unwrap_or(false)
+}
+
+pub async fn try_handle_command(
+    input: &str,
+    agent: &mut Agent,
+    hot: &mut HotState,
+    _ctx: &RunContext<'_>,
+) -> CommandResult {
+    let Some((command_name, args)) = parse_command(input) else {
+        return CommandResult::NotACommand;
+    };
 
     let response = match command_name {
         "clear" => {
@@ -114,6 +132,7 @@ pub async fn try_handle_command(
             .map(|c| format!("/{:<9} - {}", c.name, c.description))
             .collect::<Vec<_>>()
             .join("\n"),
+        "cancel" => "No running turn to cancel".to_string(),
         _ => "Unknown command. Type /help for available commands.".to_string(),
     };
 

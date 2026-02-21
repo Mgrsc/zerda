@@ -34,6 +34,13 @@ enum CallStrategy<'a, F: Fn(&str)> {
 
 type AssistantMessageCallback<'a> = Option<&'a dyn Fn(&str, bool)>;
 
+pub struct TurnSnapshot {
+    history: Vec<ConversationMessage>,
+    total_usage: Usage,
+    conversation_summary: Option<String>,
+    temp_files_len: usize,
+}
+
 pub struct Agent {
     pub history: Vec<ConversationMessage>,
     pub total_usage: Usage,
@@ -62,6 +69,22 @@ impl Agent {
 
     pub fn push_user_message(&mut self, text: String) {
         self.history.push(ConversationMessage::user(text));
+    }
+
+    pub fn snapshot_turn(&self) -> TurnSnapshot {
+        TurnSnapshot {
+            history: self.history.clone(),
+            total_usage: self.total_usage.clone(),
+            conversation_summary: self.conversation_summary.clone(),
+            temp_files_len: self.temp_files.len(),
+        }
+    }
+
+    pub fn restore_turn(&mut self, snapshot: TurnSnapshot) {
+        self.history = snapshot.history;
+        self.total_usage = snapshot.total_usage;
+        self.conversation_summary = snapshot.conversation_summary;
+        self.temp_files.truncate(snapshot.temp_files_len);
     }
 
     pub fn take_conversation_summary(&mut self) -> Option<String> {
