@@ -63,7 +63,7 @@ impl Tool for ReloadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("full");
+        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("light");
 
         let config_result = crate::config::load_config(self.config_path.as_deref());
 
