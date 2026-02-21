@@ -269,9 +269,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     if old_cfg.agent.max_history != new_cfg.agent.max_history {
         blockers.push("agent.max_history".to_string());
     }
-    if old_cfg.agent.compaction_keep_recent != new_cfg.agent.compaction_keep_recent {
-        blockers.push("agent.compaction_keep_recent".to_string());
-    }
     if old_cfg.agent.max_tool_output_chars != new_cfg.agent.max_tool_output_chars {
         blockers.push("agent.max_tool_output_chars".to_string());
     }

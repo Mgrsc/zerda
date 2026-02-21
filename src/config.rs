@@ -102,8 +102,6 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default = "default_max_history")]
     pub max_history: usize,
-    #[serde(default = "default_compaction_keep_recent")]
-    pub compaction_keep_recent: usize,
     #[serde(default = "default_max_tool_output_chars")]
     pub max_tool_output_chars: usize,
     #[serde(default = "default_max_memory_tokens")]
@@ -145,9 +143,6 @@ const fn default_max_iterations() -> usize {
 }
 const fn default_max_history() -> usize {
     30
-}
-const fn default_compaction_keep_recent() -> usize {
-    15
 }
 const fn default_max_tool_output_chars() -> usize {
     30000
@@ -383,12 +378,6 @@ fn validate_config(config: &Config) -> Result<()> {
         config.agent.max_iterations >= MIN_MAX_ITERATIONS,
         "max_iterations must be greater than or equal to {}",
         MIN_MAX_ITERATIONS
-    );
-    anyhow::ensure!(
-        config.agent.max_history > config.agent.compaction_keep_recent,
-        "max_history ({}) must be greater than compaction_keep_recent ({})",
-        config.agent.max_history,
-        config.agent.compaction_keep_recent
     );
 
     for ch in &config.channels {

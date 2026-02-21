@@ -70,10 +70,7 @@ pub async fn try_handle_command(
             "Context cleared.".to_string()
         }
         "compact" => {
-            match agent
-                .compress_with_llm(agent.config().compaction_keep_recent)
-                .await
-            {
+            match agent.compress_with_llm().await {
                 Ok(()) => "Context compressed with LLM.".to_string(),
                 Err(e) => format!("Compression failed: {e}"),
             }

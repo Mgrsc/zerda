@@ -26,7 +26,6 @@ request_timeout_secs = 120              # default 120
 [agent]
 max_iterations = 10                     # max tool calls per turn, default 10
 max_history = 30                        # trigger compression when non-system messages exceed this, default 30
-compaction_keep_recent = 15             # messages to keep after compression, default 15
 max_tool_output_chars = 30000           # truncate tool output at this length, default 30000
 max_memory_tokens = 2000                # max tokens for memory tool, default 2000
 identity_path = "~/.zerda/identity.md"  # system prompt file path, default "identity.md"

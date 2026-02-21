@@ -91,10 +91,6 @@ impl Agent {
         self.conversation_summary.take()
     }
 
-    pub fn config(&self) -> &AgentConfig {
-        &self.config
-    }
-
     pub fn has_subagent(&self) -> bool {
         self.has_subagent
     }
@@ -140,9 +136,10 @@ impl Agent {
 
         let max_iterations = self.config.max_iterations;
         for iteration in 0..max_iterations {
+            let request_history = self.sanitized_history_for_provider();
             let output = match &strategy {
                 CallStrategy::Blocking => {
-                    let response = provider.chat(&self.history, &tool_specs, opts).await?;
+                    let response = provider.chat(&request_history, &tool_specs, opts).await?;
                     TurnOutput {
                         text: response.text,
                         reasoning_content: response.reasoning_content,
@@ -153,7 +150,7 @@ impl Agent {
                     }
                 }
                 CallStrategy::Streaming { on_text } => {
-                    self.consume_stream(provider, &tool_specs, opts, on_text)
+                    self.consume_stream(provider, &request_history, &tool_specs, opts, on_text)
                         .await?
                 }
             };
@@ -338,13 +335,12 @@ impl Agent {
     async fn consume_stream(
         &self,
         provider: &dyn Provider,
+        messages: &[ConversationMessage],
         tool_specs: &[ToolSpec],
         opts: &ChatOptions,
         on_text: &dyn Fn(&str),
     ) -> Result<TurnOutput> {
-        let mut stream = provider
-            .chat_stream(&self.history, tool_specs, opts)
-            .await?;
+        let mut stream = provider.chat_stream(messages, tool_specs, opts).await?;
 
         let mut text_buf = String::new();
         let mut reasoning_buf = String::new();
@@ -563,7 +559,6 @@ impl Agent {
             summary_kind = "history_compaction",
             non_system_count,
             max_history = self.config.max_history,
-            keep_recent = self.config.compaction_keep_recent,
             "Auto-compact triggered"
         );
 
@@ -571,13 +566,12 @@ impl Agent {
             anyhow::bail!("History exceeds max_history but no compression provider configured");
         }
 
-        self.compress_with_llm(self.config.compaction_keep_recent)
-            .await?;
+        self.compress_with_llm().await?;
         Ok(true)
     }
 
-    pub async fn compress_with_llm(&mut self, keep_recent: usize) -> Result<()> {
-        let non_system_indices: Vec<usize> = self
+    pub async fn compress_with_llm(&mut self) -> Result<()> {
+        let indices_to_compact: Vec<usize> = self
             .history
             .iter()
             .enumerate()
@@ -585,12 +579,9 @@ impl Agent {
             .map(|(i, _)| i)
             .collect();
 
-        if non_system_indices.len() <= keep_recent {
+        if indices_to_compact.is_empty() {
             return Ok(());
         }
-
-        let to_compact_count = non_system_indices.len() - keep_recent;
-        let indices_to_compact: Vec<usize> = non_system_indices[..to_compact_count].to_vec();
 
         let mut transcript = String::new();
         for &i in &indices_to_compact {
@@ -670,6 +661,47 @@ impl Agent {
         );
 
         Ok(())
+    }
+
+    fn sanitized_history_for_provider(&self) -> Vec<ConversationMessage> {
+        let mut sanitized = Vec::with_capacity(self.history.len());
+        let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dropped_orphan_tool_results = 0usize;
+
+        for msg in &self.history {
+            match &msg.role {
+                Role::System | Role::User => {
+                    pending.clear();
+                    sanitized.push(msg.clone());
+                }
+                Role::Assistant => {
+                    pending.clear();
+                    for tc in &msg.tool_calls {
+                        pending.insert(tc.id.clone());
+                    }
+                    sanitized.push(msg.clone());
+                }
+                Role::ToolResult { tool_call_id, .. } => {
+                    if pending.contains(tool_call_id) {
+                        pending.remove(tool_call_id);
+                        sanitized.push(msg.clone());
+                    } else {
+                        dropped_orphan_tool_results += 1;
+                    }
+                }
+            }
+        }
+
+        if dropped_orphan_tool_results > 0 {
+            tracing::warn!(
+                dropped_orphan_tool_results,
+                history_messages = self.history.len(),
+                sanitized_messages = sanitized.len(),
+                "Dropped orphan tool result messages before provider request"
+            );
+        }
+
+        sanitized
     }
 
     async fn execute_with_confirm(
