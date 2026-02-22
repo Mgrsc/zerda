@@ -96,6 +96,7 @@ impl OpenAiResponsesProvider {
             "model": opts.model,
             "max_output_tokens": opts.max_tokens,
             "temperature": opts.temperature,
+            "top_p": opts.top_p,
             "input": input
         });
 

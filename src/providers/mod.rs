@@ -198,6 +198,7 @@ pub fn build_openai_content_parts(
 pub struct ChatOptions {
     pub model: String,
     pub temperature: f64,
+    pub top_p: f64,
     pub max_tokens: u32,
 }
 
@@ -206,6 +207,7 @@ impl ChatOptions {
         Self {
             model: config.model.clone(),
             temperature: config.temperature,
+            top_p: config.top_p,
             max_tokens: config.max_tokens,
         }
     }

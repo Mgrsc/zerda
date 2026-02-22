@@ -10,6 +10,7 @@ api_key = "${OPENAI_API_KEY}"           # required
 base_url = ""                           # default: empty (use provider default endpoint)
 model = "${OPENAI_MODEL}"               # required
 temperature = 1.0
+top_p = 0.95
 max_tokens = 4096
 vision = true                           # whether to include image inputs
 
@@ -47,6 +48,7 @@ tool_timeout = 300                      # tool execution timeout in seconds
 # base_url = ""                         # default
 # model = "${OPENAI_FAST_MODEL}"        # required when enabled
 # temperature = 1.0
+# top_p = 0.95
 # max_tokens = 4096
 # vision = true
 

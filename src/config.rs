@@ -77,6 +77,8 @@ pub struct ProviderConfig {
     pub model: String,
     #[serde(default = "default_temperature")]
     pub temperature: f64,
+    #[serde(default = "default_top_p")]
+    pub top_p: f64,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     #[serde(default = "default_true")]
@@ -92,6 +94,9 @@ const fn default_base_url() -> String {
 }
 const fn default_temperature() -> f64 {
     1.0
+}
+const fn default_top_p() -> f64 {
+    0.95
 }
 const fn default_max_tokens() -> u32 {
     4096
@@ -337,6 +342,11 @@ fn validate_config(config: &Config) -> Result<()> {
         (0.0..=2.0).contains(&config.provider.temperature),
         "temperature must be between 0.0 and 2.0, got {}",
         config.provider.temperature
+    );
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&config.provider.top_p),
+        "top_p must be between 0.0 and 1.0, got {}",
+        config.provider.top_p
     );
     anyhow::ensure!(
         config.provider.max_tokens > 0,

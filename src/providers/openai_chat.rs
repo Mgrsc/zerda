@@ -110,6 +110,7 @@ impl OpenAiChatProvider {
             "model": opts.model,
             "max_tokens": opts.max_tokens,
             "temperature": opts.temperature,
+            "top_p": opts.top_p,
             "messages": api_messages
         });
 
