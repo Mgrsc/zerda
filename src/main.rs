@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
     };
-    let mut all_tools = tools::builtin_tools((tools_runtime, tools_dependencies).into());
+    let (mut all_tools, todo_handle) = tools::builtin_tools((tools_runtime, tools_dependencies).into());
 
     let builtin_count = all_tools.len();
     let mcp_tools = tools::mcp::connect_mcp_servers(&cfg.mcp).await;
@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
 
     let mut hot = runner::HotState {
         tools: all_tools,
+        todo: todo_handle,
         identity_text,
         skills: skills_list,
         shared_skills,

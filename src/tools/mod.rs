@@ -98,7 +98,7 @@ impl From<(BuiltinToolsRuntime, BuiltinToolsDependencies)> for BuiltinToolsConte
     }
 }
 
-pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
+pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::TodoHandle) {
     let BuiltinToolsContext {
         tool_timeout,
         memory,
@@ -111,6 +111,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
         subagent_provider,
     } = ctx;
 
+    let (todo_tool, todo_handle) = todo::TodoTool::new();
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(shell::ShellTool::new(tool_timeout)),
         Box::new(read::ReadTool),
@@ -118,7 +119,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
         Box::new(reload::ReloadTool::new(config_path, reload_signal)),
         Box::new(memory_tool::MemoryTool::new(memory, max_memory_chars)),
         Box::new(skill::SkillTool::new(skills, skill_cache)),
-        Box::new(todo::TodoTool::new()),
+        Box::new(todo_tool),
     ];
     if let Some(provider) = tts_provider {
         tools.push(Box::new(tts::TtsTool::new(provider)));
@@ -130,5 +131,5 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> Vec<Box<dyn Tool>> {
             tool_timeout,
         )));
     }
-    tools
+    (tools, todo_handle)
 }

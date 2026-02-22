@@ -36,6 +36,7 @@ pub struct RunContext<'a> {
 
 pub struct HotState {
     pub tools: Vec<Box<dyn tools::Tool>>,
+    pub todo: tools::todo::TodoHandle,
     pub identity_text: Option<String>,
     pub skills: Vec<skills::Skill>,
     pub shared_skills: Arc<RwLock<Vec<skills::Skill>>>,
@@ -65,12 +66,17 @@ fn build_user_message(
     skills_list: &[Skill],
     user_context: Option<&str>,
     conversation_summary: Option<&str>,
+    todo_reminder: Option<String>,
 ) -> providers::ConversationMessage {
     let mut parts: Vec<ContentPart> = Vec::new();
 
     let skills_idx = skills::skills_index(skills_list);
     if !skills_idx.is_empty() {
         parts.push(ContentPart::Text(skills_idx));
+    }
+
+    if let Some(reminder) = todo_reminder {
+        parts.push(ContentPart::Text(reminder));
     }
 
     if let Some(ctx) = user_context {
@@ -138,6 +144,7 @@ pub(crate) fn prepare_user_turn(
 ) {
     let user_ctx = mem.load_user_context();
     let summary = agent.take_conversation_summary();
+    let todo_reminder = hot.todo.pending_reminder();
     let user_msg = build_user_message(
         content,
         content_parts,
@@ -145,6 +152,7 @@ pub(crate) fn prepare_user_turn(
         &hot.skills,
         user_ctx.as_deref(),
         summary.as_deref(),
+        todo_reminder,
     );
     agent.history.push(user_msg);
     refresh_prompt(agent, hot, channel_supplement);
@@ -736,6 +744,7 @@ pub async fn run_serve(
 
         let supplement = ch.as_ref().and_then(|c| c.prompt_supplement());
         let snapshot = session_agent.snapshot_turn();
+        hot.todo.set_session(&session_key);
         prepare_user_turn(
             &mut session_agent,
             hot,

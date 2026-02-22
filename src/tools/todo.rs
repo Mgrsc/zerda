@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
@@ -7,29 +8,44 @@ use serde_json::json;
 
 use super::{Tool, ToolResult};
 
-struct TodoItem {
-    id: usize,
-    text: String,
-    done: bool,
+pub struct TodoItem {
+    pub id: usize,
+    pub text: String,
+    pub done: bool,
 }
 
-struct TodoState {
-    items: Vec<TodoItem>,
-    next_id: usize,
+pub struct TodoState {
+    pub items: Vec<TodoItem>,
+    pub next_id: usize,
+}
+
+impl TodoState {
+    fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            next_id: 1,
+        }
+    }
 }
 
 pub struct TodoTool {
-    state: Arc<Mutex<TodoState>>,
+    store: Arc<Mutex<HashMap<String, TodoState>>>,
+    active_session: Arc<Mutex<String>>,
 }
 
 impl TodoTool {
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(TodoState {
-                items: Vec::new(),
-                next_id: 1,
-            })),
-        }
+    pub fn new() -> (Self, TodoHandle) {
+        let store = Arc::new(Mutex::new(HashMap::new()));
+        let active_session = Arc::new(Mutex::new("cli".to_string()));
+        let handle = TodoHandle {
+            store: Arc::clone(&store),
+            active_session: Arc::clone(&active_session),
+        };
+        (Self { store, active_session }, handle)
+    }
+
+    fn current_session(&self) -> String {
+        self.active_session.lock().unwrap().clone()
     }
 }
 
@@ -40,10 +56,11 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &str {
-        "Use this tool for multi-step or non-trivial tasks to keep a live plan. \
-         Typical flow: list current tasks, add missing tasks, edit when scope changes, \
-         mark tasks done as progress happens, and clear when everything is completed. \
-         Supports add, edit, done, list, and clear."
+        "IMPORTANT: You MUST proactively use this tool whenever the user's request \
+         involves 2+ steps, multiple files, or any non-trivial work. Create tasks \
+         BEFORE starting work to plan your approach, then mark each done as you go. \
+         Failure to use this tool for complex requests leads to missed steps and \
+         incomplete work. Supports add, edit, done, list, and clear."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -101,7 +118,9 @@ impl Tool for TodoTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: action"))?;
 
-        let mut state = self.state.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let session_key = self.current_session();
+        let mut store = self.store.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let state = store.entry(session_key).or_insert_with(TodoState::new);
 
         match action {
             "add" => {
@@ -196,5 +215,35 @@ impl Tool for TodoTool {
                 is_error: true,
             }),
         }
+    }
+}
+
+pub struct TodoHandle {
+    store: Arc<Mutex<HashMap<String, TodoState>>>,
+    active_session: Arc<Mutex<String>>,
+}
+
+impl TodoHandle {
+    pub fn set_session(&self, id: &str) {
+        *self.active_session.lock().unwrap() = id.to_string();
+    }
+
+    pub fn pending_reminder(&self) -> Option<String> {
+        let session = self.active_session.lock().ok()?;
+        let store = self.store.lock().ok()?;
+        let state = store.get(session.as_str())?;
+        let has_pending = state.items.iter().any(|i| !i.done);
+        if !has_pending {
+            return None;
+        }
+        let mut buf = String::from(
+            "<system-reminder>\nYou have pending TODO items. You MUST work through all tasks and mark each one done upon completion.\n\n",
+        );
+        for item in &state.items {
+            let status = if item.done { "x" } else { " " };
+            let _ = writeln!(buf, "[{status}] #{}: {}", item.id, item.text);
+        }
+        buf.push_str("</system-reminder>");
+        Some(buf)
     }
 }
