@@ -80,6 +80,9 @@ cargo build --release
 ./target/release/zerda --config zerda.toml
 ```
 
+> [!NOTE]
+> When the Agent invokes the built-in `reload` tool, the process performs a hard restart and exits. Unlike Docker (which auto-restarts via `restart: unless-stopped`), a bare binary requires an external process supervisor (e.g., `systemd`, `supervisord`) to bring it back up automatically.
+
 </details>
 
 ---
@@ -160,6 +163,40 @@ transport = "stdio"
 command = "npx"
 args = ["-y", "@scope/server"]
 ```
+
+---
+
+## 🧬 Technical Design
+
+### KV-Cache Friendly Architecture
+
+Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, user context) is injected only at the tail of the user message, never into the system prompt. The built-in tool definition list (`shell → read → write → reload → memory → skill → todo → …`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
+
+*Implementation: `src/prompt.rs` – `build_system_prompt()`, `src/tools/mod.rs` – `builtin_tools()`*
+
+### File System Context
+
+Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. The model re-accesses the full content on demand via `shell` / `read` tools (read-on-demand), avoiding upfront context bloat. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
+
+*Implementation: `src/tools/read.rs`, `src/agent.rs` – `push_tool_result()`, `src/runner.rs` – `auto_compact()`*
+
+### ToDo Recitation
+
+In long sessions, models are susceptible to the "Lost in the Middle" effect and attention-basin bias, causing attention to drop for instructions positioned in the middle of the context. To counteract this, `TodoTool` maintains a session-scoped task list. Each time a user turn is assembled, `pending_reminder()` automatically injects the outstanding items near the end of the user message. This continuously pushes global objectives into the model's recency attention window, enforcing periodic review and resisting attention collapse.
+
+*Implementation: `src/tools/todo.rs`, `src/runner.rs` – `prepare_user_turn()`*
+
+### Segmented Content Isolation
+
+Mixing information from multiple sources into a single text block leads to "Instruction Dilution," where different semantics pollute each other. Zerda structures the `content` field of the user message as an array of independent text blocks: `[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`. Each block is semantically self-contained and can be added or removed without affecting the integrity of others. Safety directives are injected as a standalone block for repeated reinforcement.
+
+*Implementation: `src/runner.rs` – `build_user_message()`*
+
+### System/User Prompt Layering (Experimental)
+
+The prompt architecture is split into two layers. The **system prompt** serves as a static kernel: identity (role anchoring) → rules (negation-first constraints) → env (structured tags). The **user prompt** acts as a dynamic shell: `<system-reminder>` tags deliver elevated reminders, and content blocks are assembled dynamically based on the model's current phase (explore / plan / execute). Negation constraints (`NEVER` / `DO NOT`) are front-loaded to establish hard boundaries; structured tags (`<env>`, `<user-context>`) enable precise extraction. The identity text occupies the very first position in the system prompt — the opening sentence anchors the role, and all subsequent rules orbit around it.
+
+*Implementation: `src/prompt.rs`, `example-docs/prompt-principles.md`*
 
 ---
 
