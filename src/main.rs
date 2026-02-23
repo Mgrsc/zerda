@@ -48,6 +48,16 @@ enum Commands {
         resume: Option<Option<String>>,
     },
     Serve,
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    Generate,
+    Validate,
 }
 
 fn init_optional_provider<T: ?Sized + 'static>(
@@ -70,6 +80,27 @@ fn init_optional_provider<T: ?Sized + 'static>(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Config { action }) = &cli.command {
+        match action {
+            ConfigAction::Generate => {
+                print!("{}", include_str!("../zerda.toml.full"));
+                return Ok(());
+            }
+            ConfigAction::Validate => {
+                match config::load_config(cli.config.as_deref()) {
+                    Ok(_) => {
+                        println!("Configuration is valid.");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("Configuration error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
 
     let cfg = config::load_config(cli.config.as_deref())?;
 
@@ -218,6 +249,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve) => {
             runner::run_serve(&run_ctx, &mut hot, &sessions_dir).await?;
         }
+        Some(Commands::Config { .. }) => unreachable!(),
         None => {
             runner::run_interactive(&mut agent, &run_ctx, &mut hot, &sessions_dir).await?;
         }
