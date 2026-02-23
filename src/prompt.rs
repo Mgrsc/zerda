@@ -79,7 +79,7 @@ pub fn build_system_prompt(
     prompt
 }
 
-fn read_os_pretty_name() -> String {
+pub(crate) fn read_os_pretty_name() -> String {
     std::fs::read_to_string("/etc/os-release")
         .ok()
         .and_then(|content| {
@@ -95,7 +95,7 @@ fn read_os_pretty_name() -> String {
         .unwrap_or_else(|| std::env::consts::OS.to_string())
 }
 
-fn read_default_shell() -> String {
+pub(crate) fn read_default_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .and_then(|s| s.rsplit('/').next().map(String::from))

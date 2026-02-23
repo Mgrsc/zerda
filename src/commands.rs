@@ -1,4 +1,5 @@
 use crate::agent::Agent;
+use crate::prompt;
 use crate::providers::{Role, Usage};
 use crate::runner::{self, HotState, RunContext};
 
@@ -109,23 +110,49 @@ pub async fn try_handle_command(
                 .filter(|m| !matches!(m.role, Role::System))
                 .count();
             let max_history = hot.cfg.agent.max_history;
-            let input = agent.total_usage.input_tokens;
-            let output = agent.total_usage.output_tokens;
-            let total = input + output;
+            let input_tokens = agent.total_usage.input_tokens;
+            let output_tokens = agent.total_usage.output_tokens;
+            let total = input_tokens + output_tokens;
+
+            let os_name = prompt::read_os_pretty_name();
+            let shell = prompt::read_default_shell();
+            let platform = std::env::consts::OS;
+            let provider_name = &hot.cfg.provider.name;
             let model = &hot.chat_opts.model;
+            let temp = hot.chat_opts.temperature;
+            let top_p = hot.chat_opts.top_p;
+            let tool_total = hot.tools.len();
+            let builtin = hot.builtin_count;
+            let mcp = tool_total - builtin;
+            let skills = hot.skills.len();
+            let pending = hot.todo.pending_count();
 
-            let mut lines = vec![
-                format!("History: {non_system}/{max_history} messages"),
-                format!("Tokens: in={input}, out={output}, total={total}"),
-                format!("Model: {model}"),
-            ];
+            let has_assistant = agent.history.iter().any(|m| matches!(m.role, Role::Assistant));
+            let usage_warning = total == 0 && has_assistant;
 
-            if let Some(budget) = hot.cfg.agent.max_budget_tokens {
-                let remaining = budget.saturating_sub(total);
-                lines.push(format!("Budget remaining: {remaining}"));
+            let mut out = String::new();
+            out.push_str(&format!("⚙️  System\n"));
+            out.push_str(&format!("  Version   {}\n", env!("ZERDA_VERSION")));
+            out.push_str(&format!("  Platform  {platform} ({os_name})\n"));
+            out.push_str(&format!("  Shell     {shell}\n"));
+            out.push_str(&format!("\n🤖 Provider\n"));
+            out.push_str(&format!("  Provider  {provider_name}\n"));
+            out.push_str(&format!("  Model     {model}\n"));
+            out.push_str(&format!("  Temp/TopP {temp} / {top_p}\n"));
+            out.push_str(&format!("\n💬 Session\n"));
+            out.push_str(&format!("  History   {non_system}/{max_history} messages\n"));
+            out.push_str(&format!("  Tools     {tool_total} ({builtin} builtin + {mcp} mcp)\n"));
+            out.push_str(&format!("  Skills    {skills} loaded\n"));
+            out.push_str(&format!("  Todos     {pending} pending\n"));
+            out.push_str(&format!("\n📊 Tokens\n"));
+            out.push_str(&format!("  Input     {}\n", fmt_thousands(input_tokens)));
+            out.push_str(&format!("  Output    {}\n", fmt_thousands(output_tokens)));
+            out.push_str(&format!("  Total     {}", fmt_thousands(total)));
+            if usage_warning {
+                out.push_str("\n  ⚠ provider may not report usage");
             }
 
-            lines.join("\n")
+            out
         }
         "help" => COMMANDS
             .iter()
@@ -137,4 +164,16 @@ pub async fn try_handle_command(
     };
 
     CommandResult::Handled(response)
+}
+
+fn fmt_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
 }

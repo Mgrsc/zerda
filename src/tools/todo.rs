@@ -228,6 +228,15 @@ impl TodoHandle {
         *self.active_session.lock().unwrap() = id.to_string();
     }
 
+    pub fn pending_count(&self) -> usize {
+        let Ok(session) = self.active_session.lock() else { return 0 };
+        let Ok(store) = self.store.lock() else { return 0 };
+        store
+            .get(session.as_str())
+            .map(|s| s.items.iter().filter(|i| !i.done).count())
+            .unwrap_or(0)
+    }
+
     pub fn pending_reminder(&self) -> Option<String> {
         let session = self.active_session.lock().ok()?;
         let store = self.store.lock().ok()?;
