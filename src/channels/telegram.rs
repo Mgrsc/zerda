@@ -376,7 +376,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             .and_then(|t| t.find("**").map(|end| &t[..end]).filter(|t| !t.is_empty()))
         {
             out.push('*');
-            out.push_str(&escape_markdown_v2_text(inner));
+            out.push_str(&render_markdown_v2_safe(inner));
             out.push('*');
             i += inner.len() + 4;
             at_line_start = false;
@@ -390,7 +390,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
             })
         }) {
             out.push('*');
-            out.push_str(&escape_markdown_v2_text(inner));
+            out.push_str(&render_markdown_v2_safe(inner));
             out.push('*');
             i += inner.len() + 2;
             at_line_start = false;
@@ -405,7 +405,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
                 let content = &after_open[..close_offset];
                 if !content.is_empty() && !content.contains('\n') {
                     out.push_str("__");
-                    out.push_str(&escape_markdown_v2_text(content));
+                    out.push_str(&render_markdown_v2_safe(content));
                     out.push_str("__");
                     i += 2 + close_offset + 2;
                     at_line_start = false;
@@ -440,7 +440,7 @@ fn render_markdown_v2_safe(text: &str) -> String {
                 })
             }) {
                 out.push('~');
-                out.push_str(&escape_markdown_v2_text(inner));
+                out.push_str(&render_markdown_v2_safe(inner));
                 out.push('~');
                 i += inner.len() + 2;
                 at_line_start = false;
