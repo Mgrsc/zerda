@@ -133,33 +133,49 @@ pub async fn try_handle_command(
                 .any(|m| matches!(m.role, Role::Assistant));
             let usage_warning = total == 0 && has_assistant;
 
-            let mut out = String::new();
-            out.push_str("⚙️  System\n");
-            out.push_str(&format!("  Version   {}\n", env!("ZERDA_VERSION")));
-            out.push_str(&format!("  Platform  {platform} ({os_name})\n"));
-            out.push_str(&format!("  Shell     {shell}\n"));
-            out.push_str("\n🤖 Provider\n");
-            out.push_str(&format!("  Provider  {provider_name}\n"));
-            out.push_str(&format!("  Model     {model}\n"));
-            out.push_str(&format!("  Temp/TopP {temp} / {top_p}\n"));
-            out.push_str("\n💬 Session\n");
-            out.push_str(&format!(
-                "  History   {non_system}/{max_history} messages\n"
-            ));
-            out.push_str(&format!(
-                "  Tools     {tool_total} ({builtin} builtin + {mcp} mcp)\n"
-            ));
-            out.push_str(&format!("  Skills    {skills} loaded\n"));
-            out.push_str(&format!("  Todos     {pending} pending\n"));
-            out.push_str("\n📊 Tokens\n");
-            out.push_str(&format!("  Input     {}\n", fmt_thousands(input_tokens)));
-            out.push_str(&format!("  Output    {}\n", fmt_thousands(output_tokens)));
-            out.push_str(&format!("  Total     {}", fmt_thousands(total)));
-            if usage_warning {
-                out.push_str("\n  ⚠ provider may not report usage");
-            }
+            const W: usize = 44;
+            let hl = format!("├{}┤", "─".repeat(W + 2));
+            let cell = |s: &str| -> String { format!("│ {:width$} │", s, width = W) };
+            let row =
+                |label: &str, value: &str| -> String { cell(&format!("  {label:<9}: {value}")) };
 
-            out
+            let mut rows: Vec<String> = Vec::new();
+            rows.push(format!("┌{}┐", "─".repeat(W + 2)));
+            rows.push(cell("System"));
+            rows.push(hl.clone());
+            rows.push(row("Version", env!("ZERDA_VERSION")));
+            rows.push(row("Platform", &format!("{platform} ({os_name})")));
+            rows.push(row("Shell", &shell));
+            rows.push(hl.clone());
+            rows.push(cell("Provider"));
+            rows.push(hl.clone());
+            rows.push(row("Provider", provider_name));
+            rows.push(row("Model", model));
+            rows.push(row("Temp/TopP", &format!("{temp} / {top_p}")));
+            rows.push(hl.clone());
+            rows.push(cell("Session"));
+            rows.push(hl.clone());
+            rows.push(row(
+                "History",
+                &format!("{non_system} / {max_history} messages"),
+            ));
+            rows.push(row(
+                "Tools",
+                &format!("{tool_total}  ({builtin} builtin, {mcp} mcp)"),
+            ));
+            rows.push(row("Skills", &format!("{skills} loaded")));
+            rows.push(row("Todos", &format!("{pending} pending")));
+            rows.push(hl.clone());
+            rows.push(cell("Tokens"));
+            rows.push(hl.clone());
+            rows.push(row("Input", &fmt_thousands(input_tokens)));
+            rows.push(row("Output", &fmt_thousands(output_tokens)));
+            if usage_warning {
+                rows.push(row("", "⚠  provider may not report usage"));
+            }
+            rows.push(format!("└{}┘", "─".repeat(W + 2)));
+
+            format!("```\n{}\n```", rows.join("\n"))
         }
         "help" => COMMANDS
             .iter()
