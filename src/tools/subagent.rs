@@ -41,7 +41,12 @@ impl Tool for SubAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Run a sub-agent (smaller model) with shell and read tools to process data, extract information, summarize content, or perform auxiliary tasks. The sub-agent can autonomously use tools to complete the given task."
+        "Use this tool only for bounded auxiliary work, not as a replacement for the main assistant. \
+         Suitable cases: processing very large files, extracting specific data, generating concise \
+         summaries, or running background sub-steps that benefit from isolated tool use. \
+         Do not delegate the user's full request, final decision-making, or end-to-end task ownership \
+         to the sub-agent. The main assistant must remain responsible for planning, integration, and \
+         the final user-facing answer."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

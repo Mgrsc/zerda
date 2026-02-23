@@ -62,11 +62,11 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &str {
-        "IMPORTANT: You MUST proactively use this tool whenever the user's request \
-         involves 2+ steps, multiple files, or any non-trivial work. Create tasks \
-         BEFORE starting work to plan your approach, then mark each done as you go. \
-         Failure to use this tool for complex requests leads to missed steps and \
-         incomplete work. Supports add, edit, done, list, and clear."
+        "Use this tool only for complex development tasks that involve multiple files \
+         or long-term planning. Do not use it for simple, immediate queries such as \
+         quick searches or basic API calls. For complex work, create tasks before \
+         starting and mark them done as progress is made. Supports add, edit, done, \
+         list, and clear."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
