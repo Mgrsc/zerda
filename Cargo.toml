@@ -1,6 +1,6 @@
 [package]
 name = "zerda"
-version = "0.1.0"
+version = "0.0.1-beta.6"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Mgrsc/zerda"
