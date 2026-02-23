@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod memory_tool;
 pub mod read;
 pub mod reload;
+pub mod schema_compat;
 pub mod shell;
 pub mod skill;
 pub mod subagent;
@@ -42,7 +43,10 @@ pub trait Tool: Send + Sync {
         ToolSpec {
             name: self.name().to_string(),
             description: self.description().to_string(),
-            parameters: self.parameters_schema(),
+            parameters: schema_compat::sanitize_top_level_schema(
+                self.parameters_schema(),
+                self.name(),
+            ),
         }
     }
 }

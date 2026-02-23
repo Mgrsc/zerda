@@ -87,30 +87,7 @@ impl Tool for TodoTool {
                     "description": "Task text (required for add and edit)"
                 }
             },
-            "required": ["action"],
-            "allOf": [
-                {
-                    "if": {
-                        "properties": { "action": { "const": "add" } },
-                        "required": ["action"]
-                    },
-                    "then": { "required": ["text"] }
-                },
-                {
-                    "if": {
-                        "properties": { "action": { "const": "edit" } },
-                        "required": ["action"]
-                    },
-                    "then": { "required": ["id", "text"] }
-                },
-                {
-                    "if": {
-                        "properties": { "action": { "const": "done" } },
-                        "required": ["action"]
-                    },
-                    "then": { "required": ["id"] }
-                }
-            ]
+            "required": ["action"]
         })
     }
 
