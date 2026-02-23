@@ -23,6 +23,17 @@
 
 ---
 
+## 🗂️ Quick Navigation
+
+- [✨ Key Features](#-key-features)
+- [🚀 Getting Started](#-getting-started)
+- [⚙️ Configuration](#-configuration)
+- [💻 CLI Usage](#-cli-usage)
+- [🔌 Extension Capabilities](#-extension-capabilities)
+- [🧬 Technical Design](#-technical-design)
+
+---
+
 ## ✨ Key Features
 
 - 🧠 **Multi-Model Support**: Seamlessly switch between OpenAI (Chat Completions API and the new Responses API) and Anthropic models at runtime.
@@ -131,8 +142,10 @@ Zerda provides a powerful command-line interface:
 | :--- | :--- |
 | `zerda` | Enter the interactive chat mode. |
 | `zerda run -m "<message>"` | Execute a single instruction and exit. |
-| `zerda run --resume` | Resume the most recent session. |
+| `zerda run --resume [session_id]` | Resume the latest session or a specific session by ID. |
 | `zerda serve` | Start background services (e.g., Telegram Bot). |
+| `zerda config generate` | Print the full example config template (`zerda.toml.full`). |
+| `zerda config validate` | Validate the active config file and exit. |
 
 ### 🛠️ Interactive Mode Commands
 
@@ -143,6 +156,8 @@ While in the interactive chat mode, you can use the following commands:
 - `/clear`: Clear the current session history.
 - `/compact`: Force context compression using the LLM.
 - `/status`: Display token usage, budget, and system status.
+- `/cancel`: Cancel the current running turn.
+- `/exit` / `/quit`: Exit interactive mode (CLI session).
 
 ---
 
@@ -168,35 +183,34 @@ args = ["-y", "@scope/server"]
 
 ## 🧬 Technical Design
 
+<details>
+<summary><b>Expand Technical Design</b></summary>
+
 ### KV-Cache Friendly Architecture
 
 Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, user context) is injected only at the tail of the user message, never into the system prompt. The built-in tool definition list (`shell → read → write → reload → memory → skill → todo → …`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
-
-*Implementation: `src/prompt.rs` – `build_system_prompt()`, `src/tools/mod.rs` – `builtin_tools()`*
 
 ### File System Context
 
 Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. The model re-accesses the full content on demand via `shell` / `read` tools (read-on-demand), avoiding upfront context bloat. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
 
-*Implementation: `src/tools/read.rs`, `src/agent.rs` – `push_tool_result()`, `src/runner.rs` – `auto_compact()`*
-
 ### ToDo Recitation
 
 In long sessions, models are susceptible to the "Lost in the Middle" effect and attention-basin bias, causing attention to drop for instructions positioned in the middle of the context. To counteract this, `TodoTool` maintains a session-scoped task list. Each time a user turn is assembled, `pending_reminder()` automatically injects the outstanding items near the end of the user message. This continuously pushes global objectives into the model's recency attention window, enforcing periodic review and resisting attention collapse.
 
-*Implementation: `src/tools/todo.rs`, `src/runner.rs` – `prepare_user_turn()`*
+### Keep the Errors
+
+Zerda does not scrub failed actions or tool errors. Every tool result, including `is_error` signals, is written back into conversation history and reused in subsequent reasoning as negative constraints for in-context learning. This enables implicit backtracking away from known-bad paths and reduces repeated failures. Even during auto-compaction, the full raw transcript is persisted before summarization so error context remains recoverable.
 
 ### Segmented Content Isolation
 
 Mixing information from multiple sources into a single text block leads to "Instruction Dilution," where different semantics pollute each other. Zerda structures the `content` field of the user message as an array of independent text blocks: `[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`. Each block is semantically self-contained and can be added or removed without affecting the integrity of others. Safety directives are injected as a standalone block for repeated reinforcement.
 
-*Implementation: `src/runner.rs` – `build_user_message()`*
-
 ### System/User Prompt Layering (Experimental)
 
 The prompt architecture is split into two layers. The **system prompt** serves as a static kernel: identity (role anchoring) → rules (negation-first constraints) → env (structured tags). The **user prompt** acts as a dynamic shell: `<system-reminder>` tags deliver elevated reminders, and content blocks are assembled dynamically based on the model's current phase (explore / plan / execute). Negation constraints (`NEVER` / `DO NOT`) are front-loaded to establish hard boundaries; structured tags (`<env>`, `<user-context>`) enable precise extraction. The identity text occupies the very first position in the system prompt — the opening sentence anchors the role, and all subsequent rules orbit around it.
 
-*Implementation: `src/prompt.rs`, `example-docs/prompt-principles.md`*
+</details>
 
 ---
 

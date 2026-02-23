@@ -23,6 +23,17 @@
 
 ---
 
+## 🗂️ 快速导航
+
+- [✨ 核心特性](#-核心特性)
+- [🚀 快速开始](#-快速开始)
+- [⚙️ 配置说明](#-配置说明)
+- [💻 CLI 使用手册](#-cli-使用手册)
+- [🔌 扩展能力](#-扩展能力)
+- [🧬 技术设计](#-技术设计)
+
+---
+
 ## ✨ 核心特性
 
 - 🧠 **多模型驱动**：无缝支持 OpenAI（同时兼容经典的 Chat Completions 接口与最新的 Responses 接口）和 Anthropic，并允许在运行时动态切换模型。
@@ -131,8 +142,10 @@ Zerda 提供了功能丰富的命令行接口：
 | :--- | :--- |
 | `zerda` | 直接进入交互式对话模式。 |
 | `zerda run -m "<消息>"` | 执行单条指令后立即退出。 |
-| `zerda run --resume` | 恢复并继续上一次未完成的会话。 |
+| `zerda run --resume [session_id]` | 恢复最近会话，或按会话 ID 恢复指定会话。 |
 | `zerda serve` | 启动后台服务（例如 Telegram Bot 监听）。 |
+| `zerda config generate` | 输出完整配置模板（`zerda.toml.full`）。 |
+| `zerda config validate` | 校验当前生效配置并退出。 |
 
 ### 🛠️ 交互模式命令
 
@@ -143,6 +156,8 @@ Zerda 提供了功能丰富的命令行接口：
 - `/clear`：清空当前会话的历史记录。
 - `/compact`：强制触发 LLM 进行上下文压缩。
 - `/status`：查看当前的 Token 用量、预算限制及系统状态。
+- `/cancel`：取消当前正在执行的轮次。
+- `/exit` / `/quit`：退出交互模式（CLI 会话）。
 
 ---
 
@@ -168,29 +183,34 @@ args = ["-y", "@scope/server"]
 
 ## 🧬 技术设计
 
+<details>
+<summary><b>展开技术设计</b></summary>
+
 ### KV-Cache 友好架构
 
-Zerda 的 system prompt 完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到 user message 的末端，绝不侵入 system prompt。内置工具定义列表（`shell → read → write → reload → memory → skill → todo → …`）顺序锁定，运行时不增删，防止 tool definitions hash 变化导致前缀缓存失效。会话历史遵循 append-only 原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
-
+Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。内置工具定义列表（`shell → read → write → reload → memory → skill → todo → …`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
 
 ### 文件系统上下文
 
-大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。模型按需通过 `shell` / `read` 工具重新读取完整内容（read-on-demand），避免预载造成的上下文膨胀。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
-
+大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。模型按需通过 `shell` / `read` 工具重新读取完整内容（按需读取，Read-on-Demand），避免预载造成的上下文膨胀。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
 
 ### ToDo Recitation（待办事项背诵）
 
-长会话中，模型易受"Lost in the Middle"效应和注意力盆地偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个 session 级待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入 user message 靠近末端的位置。这一机制持续将全局目标推入模型的近期注意力窗口，强制周期性复习，有效对抗注意力坍缩。
+长会话中，模型易受“迷失在中间（Lost in the Middle）”效应和注意力盆地（Attention Basin）偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个会话级（Session-Scoped）待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入用户消息（User Message）靠近末端的位置。这一机制持续将全局目标推入模型的近因偏好（Recency Bias）注意力窗口，强制周期性复习，有效对抗注意力坍缩。
 
+### Keep the Errors（保留错误现场）
+
+Zerda 不会清理失败动作（Failed Actions）和工具报错（Tool Errors）。每次工具调用结果（含 `is_error` 标记）都会写回会话历史，并在后续推理中作为负面约束（Negative Constraints）参与上下文内学习（In-Context Learning）。这让模型能够利用已失败路径进行隐式回溯（Backtracking），减少同类错误的重复尝试；即使触发自动压缩，完整原始转录也会先落盘保存，确保错误现场可追溯。
 
 ### Segmented Content Isolation（分段式内容隔离）
 
-多来源信息混入同一文本块会导致"Instruction Dilution"（提示词稀释），不同语义相互污染。Zerda 将 user message 的 `content` 字段组织为独立 text block 数组：`[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
-
+多来源信息混入同一文本块会导致提示词稀释（Instruction Dilution），不同语义相互污染。Zerda 将用户消息（User Message）的 `content` 字段组织为独立文本块（Text Block）数组：`[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
 
 ### System/User Prompt Layering（提示词分层架构）(Experimental)
 
-提示词架构分为两层。**System prompt** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**User prompt** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，content block 根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<user-context>`）便于精准提取。identity 文本位于 system prompt 的最前位，首句锚定身份，后续所有规则围绕该身份展开。
+提示词架构分为两层。**系统提示词（System Prompt）** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**用户提示词（User Prompt）** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，内容块（Content Block）根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<user-context>`）便于精准提取。identity 文本位于系统提示词（System Prompt）的最前位，首句锚定身份，后续所有规则围绕该身份展开。
+
+</details>
 
 
 ---
