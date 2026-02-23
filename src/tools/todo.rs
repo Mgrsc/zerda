@@ -41,7 +41,13 @@ impl TodoTool {
             store: Arc::clone(&store),
             active_session: Arc::clone(&active_session),
         };
-        (Self { store, active_session }, handle)
+        (
+            Self {
+                store,
+                active_session,
+            },
+            handle,
+        )
     }
 
     fn current_session(&self) -> String {
@@ -229,8 +235,12 @@ impl TodoHandle {
     }
 
     pub fn pending_count(&self) -> usize {
-        let Ok(session) = self.active_session.lock() else { return 0 };
-        let Ok(store) = self.store.lock() else { return 0 };
+        let Ok(session) = self.active_session.lock() else {
+            return 0;
+        };
+        let Ok(store) = self.store.lock() else {
+            return 0;
+        };
         store
             .get(session.as_str())
             .map(|s| s.items.iter().filter(|i| !i.done).count())

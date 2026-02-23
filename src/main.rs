@@ -87,18 +87,16 @@ async fn main() -> Result<()> {
                 print!("{}", include_str!("../zerda.toml.full"));
                 return Ok(());
             }
-            ConfigAction::Validate => {
-                match config::load_config(cli.config.as_deref()) {
-                    Ok(_) => {
-                        println!("Configuration is valid.");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        eprintln!("Configuration error: {e}");
-                        std::process::exit(1);
-                    }
+            ConfigAction::Validate => match config::load_config(cli.config.as_deref()) {
+                Ok(_) => {
+                    println!("Configuration is valid.");
+                    return Ok(());
                 }
-            }
+                Err(e) => {
+                    eprintln!("Configuration error: {e}");
+                    std::process::exit(1);
+                }
+            },
         }
     }
 
@@ -154,19 +152,23 @@ async fn main() -> Result<()> {
                 (Arc::from(p), opts)
             }
             Err(e) => {
-                tracing::warn!("Failed to create fast_model provider, falling back to main provider: {e}");
+                tracing::warn!(
+                    "Failed to create fast_model provider, falling back to main provider: {e}"
+                );
                 let p = providers::create_provider(&cfg.provider)
                     .expect("main provider already validated");
                 (Arc::from(p), chat_opts.clone())
             }
         }
     } else {
-        let p = providers::create_provider(&cfg.provider)
-            .expect("main provider already validated");
+        let p = providers::create_provider(&cfg.provider).expect("main provider already validated");
         (Arc::from(p), chat_opts.clone())
     };
 
-    let subagent_provider = (Arc::clone(&fast_model_provider.0), fast_model_provider.1.clone());
+    let subagent_provider = (
+        Arc::clone(&fast_model_provider.0),
+        fast_model_provider.1.clone(),
+    );
 
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
@@ -181,7 +183,8 @@ async fn main() -> Result<()> {
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
     };
-    let (mut all_tools, todo_handle) = tools::builtin_tools((tools_runtime, tools_dependencies).into());
+    let (mut all_tools, todo_handle) =
+        tools::builtin_tools((tools_runtime, tools_dependencies).into());
 
     let builtin_count = all_tools.len();
     let mcp_tools = tools::mcp::connect_mcp_servers(&cfg.mcp).await;
@@ -194,11 +197,16 @@ async fn main() -> Result<()> {
         None
     };
 
-    let system_prompt =
-        prompt::build_system_prompt(identity_text.as_deref(), None);
+    let system_prompt = prompt::build_system_prompt(identity_text.as_deref(), None);
 
     let compression_provider = (fast_model_provider.0, fast_model_provider.1);
-    let mut agent = agent::Agent::new(cfg.agent.clone(), (Arc::clone(&compression_provider.0), compression_provider.1.clone()));
+    let mut agent = agent::Agent::new(
+        cfg.agent.clone(),
+        (
+            Arc::clone(&compression_provider.0),
+            compression_provider.1.clone(),
+        ),
+    );
     agent.set_system_prompt(system_prompt);
 
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");

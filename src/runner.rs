@@ -52,10 +52,7 @@ pub(crate) fn refresh_prompt(
     hot: &HotState,
     channel_supplement: Option<&str>,
 ) {
-    let system_prompt = build_system_prompt(
-        hot.identity_text.as_deref(),
-        channel_supplement,
-    );
+    let system_prompt = build_system_prompt(hot.identity_text.as_deref(), channel_supplement);
     agent.set_system_prompt(system_prompt);
 }
 
@@ -181,7 +178,10 @@ async fn post_turn(agent: &mut agent::Agent, hot: &HotState) -> BudgetStatus {
         }
     }
 
-    if let Err(e) = agent.auto_compact(&config::resolve_path(config::MEMORY_DIR)).await {
+    if let Err(e) = agent
+        .auto_compact(&config::resolve_path(config::MEMORY_DIR))
+        .await
+    {
         tracing::warn!("Auto-compact failed: {e}");
     }
     BudgetStatus::Ok
@@ -272,10 +272,7 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     if old_cfg.agent.max_memory_tokens != new_cfg.agent.max_memory_tokens {
         blockers.push("agent.max_memory_tokens".to_string());
     }
-    if !fast_model_equal(
-        &old_cfg.agent.fast_model,
-        &new_cfg.agent.fast_model,
-    ) {
+    if !fast_model_equal(&old_cfg.agent.fast_model, &new_cfg.agent.fast_model) {
         blockers.push("agent.fast_model".to_string());
     }
     if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
@@ -588,7 +585,10 @@ pub async fn run_serve(
                         } else {
                             let mut fresh = agent::Agent::new(
                                 hot.cfg.agent.clone(),
-                                (Arc::clone(&hot.compression_provider.0), hot.compression_provider.1.clone()),
+                                (
+                                    Arc::clone(&hot.compression_provider.0),
+                                    hot.compression_provider.1.clone(),
+                                ),
                             );
                             if let Ok((loaded_id, history)) =
                                 agent::Agent::load_session(sessions_dir, Some(&storage_id))
@@ -709,7 +709,10 @@ pub async fn run_serve(
         } else {
             let mut fresh = agent::Agent::new(
                 hot.cfg.agent.clone(),
-                (Arc::clone(&hot.compression_provider.0), hot.compression_provider.1.clone()),
+                (
+                    Arc::clone(&hot.compression_provider.0),
+                    hot.compression_provider.1.clone(),
+                ),
             );
             if let Ok((loaded_id, history)) =
                 agent::Agent::load_session(sessions_dir, Some(&storage_id))
@@ -760,21 +763,23 @@ pub async fn run_serve(
             let sender = sender.clone();
             let token = typing_cancel.clone();
             let span = turn_span.clone();
-            tokio::spawn(async move {
-                loop {
-                    if token.is_cancelled() {
-                        break;
-                    }
-                    if let Err(e) = ch.send_typing(&sender).await {
-                        tracing::debug!("Failed to send typing event: {e}");
-                    }
-                    tokio::select! {
-                        () = token.cancelled() => break,
-                        () = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
+            tokio::spawn(
+                async move {
+                    loop {
+                        if token.is_cancelled() {
+                            break;
+                        }
+                        if let Err(e) = ch.send_typing(&sender).await {
+                            tracing::debug!("Failed to send typing event: {e}");
+                        }
+                        tokio::select! {
+                            () = token.cancelled() => break,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
+                        }
                     }
                 }
-            }
-            .instrument(span));
+                .instrument(span),
+            );
         }
 
         let mut tool_phase_handle = None;

@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use super::{
     sse_stream, truncate_for_log, ChatOptions, ContentPart, ConversationMessage, HttpClient,
-    Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock, ToolCall,
-    ToolSpec, Usage,
+    Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec,
+    Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -183,7 +183,10 @@ impl AnthropicProvider {
                             .and_then(Value::as_str)
                             .map(std::string::ToString::to_string);
                         if !thinking.is_empty() || signature.is_some() {
-                            thinking_blocks.push(ThinkingBlock::Thinking { thinking, signature });
+                            thinking_blocks.push(ThinkingBlock::Thinking {
+                                thinking,
+                                signature,
+                            });
                         }
                     }
                     Some("redacted_thinking") => {
@@ -328,10 +331,7 @@ enum PendingThinkingKind {
     RedactedThinking,
 }
 
-fn parse_sse_event(
-    block: &str,
-    state: &mut AnthropicStreamState,
-) -> Vec<Result<StreamEvent>> {
+fn parse_sse_event(block: &str, state: &mut AnthropicStreamState) -> Vec<Result<StreamEvent>> {
     let mut event_type = "";
     let mut data_str = String::new();
 
@@ -373,7 +373,11 @@ fn parse_sse_event(
             let Some(cb) = data.get("content_block") else {
                 return Vec::new();
             };
-            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+            let Some(index) = data
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+            else {
                 return Vec::new();
             };
             let Some(block_type) = cb.get("type").and_then(Value::as_str) else {
@@ -419,7 +423,11 @@ fn parse_sse_event(
             let Some(delta) = data.get("delta") else {
                 return Vec::new();
             };
-            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+            let Some(index) = data
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+            else {
                 return Vec::new();
             };
             let Some(delta_type) = delta.get("type").and_then(Value::as_str) else {
@@ -472,7 +480,11 @@ fn parse_sse_event(
             }
         }
         "content_block_stop" => {
-            let Some(index) = data.get("index").and_then(Value::as_u64).map(|v| v as usize) else {
+            let Some(index) = data
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+            else {
                 return Vec::new();
             };
             let Some(pending) = state.pending_thinking.remove(&index) else {

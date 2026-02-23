@@ -11,8 +11,8 @@ use uuid::Uuid;
 use crate::config::AgentConfig;
 use crate::logging::{summarize_json, summarize_text};
 use crate::providers::{
-    ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent,
-    ThinkingBlock, ToolCall, ToolSpec, Usage,
+    ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent, ThinkingBlock,
+    ToolCall, ToolSpec, Usage,
 };
 use crate::tools::{Tool, ToolResult};
 use crate::util::fs::atomic_write_text;
@@ -51,7 +51,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(config: AgentConfig, compression_provider: (Arc<dyn Provider>, ChatOptions)) -> Self {
+    pub fn new(
+        config: AgentConfig,
+        compression_provider: (Arc<dyn Provider>, ChatOptions),
+    ) -> Self {
         Self {
             history: Vec::new(),
             total_usage: Usage::default(),
@@ -104,7 +107,7 @@ impl Agent {
             CallStrategy::<fn(&str)>::Blocking,
             None,
         )
-            .await
+        .await
     }
 
     pub async fn run_turn_stream(
@@ -365,7 +368,8 @@ impl Agent {
                     let kind = meta.get("kind").and_then(serde_json::Value::as_str);
                     match kind {
                         Some("openai_reasoning_content_delta") => {
-                            if let Some(delta) = meta.get("delta").and_then(serde_json::Value::as_str)
+                            if let Some(delta) =
+                                meta.get("delta").and_then(serde_json::Value::as_str)
                             {
                                 reasoning_buf.push_str(delta);
                             }

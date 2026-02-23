@@ -14,10 +14,7 @@ static ENV_INFO: LazyLock<EnvInfo> = LazyLock::new(|| EnvInfo {
     package_manager: detect_package_manager(),
 });
 
-pub fn build_system_prompt(
-    identity: Option<&str>,
-    channel_supplement: Option<&str>,
-) -> String {
+pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(id) = identity {

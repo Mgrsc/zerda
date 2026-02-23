@@ -190,8 +190,7 @@ fn normalize_telegram_markdown(text: &str) -> String {
 fn escape_markdown_v2_char(ch: char, out: &mut String) {
     if matches!(
         ch,
-        '\\'
-            | '_'
+        '\\' | '_'
             | '*'
             | '['
             | ']'
@@ -371,9 +370,10 @@ fn render_markdown_v2_safe(text: &str) -> String {
             }
         }
 
-        if let Some(inner) = rest.strip_prefix("**").and_then(|t| {
-            t.find("**").map(|end| &t[..end]).filter(|t| !t.is_empty())
-        }) {
+        if let Some(inner) = rest
+            .strip_prefix("**")
+            .and_then(|t| t.find("**").map(|end| &t[..end]).filter(|t| !t.is_empty()))
+        {
             out.push('*');
             out.push_str(&escape_markdown_v2_text(inner));
             out.push('*');

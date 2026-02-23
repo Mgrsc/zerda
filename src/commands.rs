@@ -127,24 +127,31 @@ pub async fn try_handle_command(
             let skills = hot.skills.len();
             let pending = hot.todo.pending_count();
 
-            let has_assistant = agent.history.iter().any(|m| matches!(m.role, Role::Assistant));
+            let has_assistant = agent
+                .history
+                .iter()
+                .any(|m| matches!(m.role, Role::Assistant));
             let usage_warning = total == 0 && has_assistant;
 
             let mut out = String::new();
-            out.push_str(&format!("⚙️  System\n"));
+            out.push_str("⚙️  System\n");
             out.push_str(&format!("  Version   {}\n", env!("ZERDA_VERSION")));
             out.push_str(&format!("  Platform  {platform} ({os_name})\n"));
             out.push_str(&format!("  Shell     {shell}\n"));
-            out.push_str(&format!("\n🤖 Provider\n"));
+            out.push_str("\n🤖 Provider\n");
             out.push_str(&format!("  Provider  {provider_name}\n"));
             out.push_str(&format!("  Model     {model}\n"));
             out.push_str(&format!("  Temp/TopP {temp} / {top_p}\n"));
-            out.push_str(&format!("\n💬 Session\n"));
-            out.push_str(&format!("  History   {non_system}/{max_history} messages\n"));
-            out.push_str(&format!("  Tools     {tool_total} ({builtin} builtin + {mcp} mcp)\n"));
+            out.push_str("\n💬 Session\n");
+            out.push_str(&format!(
+                "  History   {non_system}/{max_history} messages\n"
+            ));
+            out.push_str(&format!(
+                "  Tools     {tool_total} ({builtin} builtin + {mcp} mcp)\n"
+            ));
             out.push_str(&format!("  Skills    {skills} loaded\n"));
             out.push_str(&format!("  Todos     {pending} pending\n"));
-            out.push_str(&format!("\n📊 Tokens\n"));
+            out.push_str("\n📊 Tokens\n");
             out.push_str(&format!("  Input     {}\n", fmt_thousands(input_tokens)));
             out.push_str(&format!("  Output    {}\n", fmt_thousands(output_tokens)));
             out.push_str(&format!("  Total     {}", fmt_thousands(total)));
@@ -170,7 +177,7 @@ fn fmt_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);
