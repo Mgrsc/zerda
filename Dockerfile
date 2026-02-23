@@ -2,7 +2,9 @@ FROM rust:slim-bookworm AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
+COPY zerda.toml.full ./zerda.toml.full
 COPY src ./src
 RUN find src -name '*.rs' -exec touch {} + && cargo build --release && strip target/release/zerda
 
