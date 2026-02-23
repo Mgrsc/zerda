@@ -213,6 +213,63 @@ impl ChatOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingMode {
+    Both,
+    TemperatureOnly,
+    TopPOnly,
+}
+
+pub fn preferred_single_sampling_mode(opts: &ChatOptions) -> SamplingMode {
+    let temp_is_default = (opts.temperature - 1.0).abs() < 1e-9;
+    let top_p_is_default = (opts.top_p - 0.95).abs() < 1e-9;
+    if temp_is_default && !top_p_is_default {
+        SamplingMode::TopPOnly
+    } else {
+        SamplingMode::TemperatureOnly
+    }
+}
+
+pub fn initial_sampling_mode(model: &str, opts: &ChatOptions) -> SamplingMode {
+    if model.to_ascii_lowercase().contains("claude") {
+        preferred_single_sampling_mode(opts)
+    } else {
+        SamplingMode::Both
+    }
+}
+
+pub fn apply_sampling_mode(body: &mut Value, opts: &ChatOptions, mode: SamplingMode) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    match mode {
+        SamplingMode::Both => {
+            obj.insert("temperature".to_string(), serde_json::json!(opts.temperature));
+            obj.insert("top_p".to_string(), serde_json::json!(opts.top_p));
+        }
+        SamplingMode::TemperatureOnly => {
+            obj.insert("temperature".to_string(), serde_json::json!(opts.temperature));
+            obj.remove("top_p");
+        }
+        SamplingMode::TopPOnly => {
+            obj.insert("top_p".to_string(), serde_json::json!(opts.top_p));
+            obj.remove("temperature");
+        }
+    }
+}
+
+pub fn is_dual_sampling_conflict_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    if !(msg.contains("temperature") && msg.contains("top_p")) {
+        return false;
+    }
+    msg.contains("cannot both")
+        || msg.contains("not both")
+        || msg.contains("only one")
+        || msg.contains("either")
+        || msg.contains("does not allow both")
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
     pub text: Option<String>,

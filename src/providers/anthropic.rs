@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::{
-    sse_stream, truncate_for_log, ChatOptions, ContentPart, ConversationMessage, HttpClient,
-    Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec,
-    Usage,
+    apply_sampling_mode, initial_sampling_mode, is_dual_sampling_conflict_error,
+    preferred_single_sampling_mode, sse_stream, truncate_for_log, ChatOptions, ContentPart,
+    ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode, StreamEvent,
+    StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -268,17 +269,43 @@ impl Provider for AnthropicProvider {
         tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse> {
-        let body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         let url = format!("{}/messages", self.http.base_url);
         let headers = [
             ("x-api-key", self.http.api_key.clone()),
             ("anthropic-version", "2023-06-01".to_string()),
         ];
-        tracing::info!("Anthropic chat: model={}", opts.model);
-        let resp_body = self
-            .http
-            .send_request(&url, &headers, &body, "Anthropic")
-            .await?;
+        tracing::info!(
+            "Anthropic chat: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
+        let resp_body = match self.http.send_request(&url, &headers, &body, "Anthropic").await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "Anthropic dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_request(&url, &headers, &body, "Anthropic")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         Ok(Self::parse_response(&resp_body))
     }
 
@@ -289,6 +316,8 @@ impl Provider for AnthropicProvider {
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
         let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         body["stream"] = json!(true);
 
         let url = format!("{}/messages", self.http.base_url);
@@ -297,11 +326,39 @@ impl Provider for AnthropicProvider {
             ("anthropic-version", "2023-06-01".to_string()),
         ];
 
-        tracing::info!("Anthropic stream: model={}", opts.model);
-        let resp = self
+        tracing::info!(
+            "Anthropic stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
+        let resp = match self
             .http
             .send_stream_request(&url, &headers, &body, "Anthropic")
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "Anthropic stream dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_stream_request(&url, &headers, &body, "Anthropic")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         Ok(sse_stream(
             resp.bytes_stream(),

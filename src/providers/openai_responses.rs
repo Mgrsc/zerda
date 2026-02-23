@@ -5,9 +5,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use super::{
-    build_openai_content_parts, sse_stream, truncate_for_log, ChatOptions, ConversationMessage,
-    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock,
-    ToolCall, ToolSpec, Usage,
+    apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
+    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream,
+    truncate_for_log, ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse,
+    Role, SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -210,14 +211,44 @@ impl Provider for OpenAiResponsesProvider {
         tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse> {
-        let body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         let url = format!("{}/responses", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
-        tracing::info!("OpenAI Responses: model={}", opts.model);
-        let resp_body = self
+        tracing::info!(
+            "OpenAI Responses: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
+        let resp_body = match self
             .http
             .send_request(&url, &headers, &body, "OpenAI Responses")
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "OpenAI Responses dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_request(&url, &headers, &body, "OpenAI Responses")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         Self::parse_response(&resp_body)
     }
 
@@ -228,16 +259,46 @@ impl Provider for OpenAiResponsesProvider {
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
         let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         body["stream"] = json!(true);
 
         let url = format!("{}/responses", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
-        tracing::info!("OpenAI Responses stream: model={}", opts.model);
-        let resp = self
+        tracing::info!(
+            "OpenAI Responses stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
+        let resp = match self
             .http
             .send_stream_request(&url, &headers, &body, "OpenAI Responses")
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "OpenAI Responses stream dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_stream_request(&url, &headers, &body, "OpenAI Responses")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         Ok(sse_stream(
             resp.bytes_stream(),

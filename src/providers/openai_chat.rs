@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::{
-    build_openai_content_parts, sse_stream, truncate_for_log, ChatOptions, ConversationMessage,
-    HttpClient, Provider, ProviderResponse, Role, StreamEvent, StreamResult, ThinkingBlock,
-    ToolCall, ToolSpec, Usage,
+    apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
+    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream,
+    truncate_for_log, ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse,
+    Role, SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderConfig;
 
@@ -212,15 +213,45 @@ impl Provider for OpenAiChatProvider {
         tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse> {
-        let body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         let url = format!("{}/chat/completions", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
-        tracing::info!("OpenAI Chat: model={}", opts.model);
+        tracing::info!(
+            "OpenAI Chat: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
         let started = Instant::now();
-        let resp_body = self
+        let resp_body = match self
             .http
             .send_request(&url, &headers, &body, "OpenAI Chat")
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "OpenAI Chat dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_request(&url, &headers, &body, "OpenAI Chat")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         tracing::info!(
             "OpenAI Chat response received: model={}, elapsed_ms={}",
             opts.model,
@@ -236,18 +267,48 @@ impl Provider for OpenAiChatProvider {
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
         let mut body = self.build_request(messages, tools, opts);
+        let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
+        apply_sampling_mode(&mut body, opts, sampling_mode);
         body["stream"] = json!(true);
         body["stream_options"] = json!({"include_usage": true});
 
         let url = format!("{}/chat/completions", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
-        tracing::info!("OpenAI Chat stream: model={}", opts.model);
+        tracing::info!(
+            "OpenAI Chat stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            opts.model,
+            sampling_mode,
+            opts.temperature,
+            opts.top_p
+        );
         let started = Instant::now();
-        let resp = self
+        let resp = match self
             .http
             .send_stream_request(&url, &headers, &body, "OpenAI Chat")
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
+                    sampling_mode = preferred_single_sampling_mode(opts);
+                    apply_sampling_mode(&mut body, opts, sampling_mode);
+                    tracing::warn!(
+                        model = %opts.model,
+                        sampling_mode = ?sampling_mode,
+                        temperature = opts.temperature,
+                        top_p = opts.top_p,
+                        error = %err,
+                        "OpenAI Chat stream dual-sampling conflict; retrying with single sampling parameter"
+                    );
+                    self.http
+                        .send_stream_request(&url, &headers, &body, "OpenAI Chat")
+                        .await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         tracing::info!(
             "OpenAI Chat stream connected: model={}, elapsed_ms={}",
             opts.model,
