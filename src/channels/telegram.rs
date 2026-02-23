@@ -13,6 +13,7 @@ use crate::stt::SttProvider;
 
 const POLLING_TIMEOUT: u64 = 30;
 const SPLIT_DELAY_MS: u64 = 100;
+const TELEGRAM_PROMPT_SUPPLEMENT: &str = include_str!("../prompts/telegram_supplement.md");
 
 fn split_message(message: &str, max_len: usize) -> Vec<String> {
     let max_len = max_len.max(1);
@@ -790,32 +791,7 @@ impl Channel for TelegramChannel {
     }
 
     fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "You are responding via Telegram. Rich content markers:\n\
-             - <image>URL_OR_ABSOLUTE_PATH</image> — Send an image by URL or absolute file path\n\
-             - <voice>PATH</voice> — Send a voice message from a file path\n\
-             Response format contract:\n\
-             1. Put the conclusion in the first line.\n\
-             2. Then use a numbered list with 2-4 key points.\n\
-             3. Keep each point short (no more than 2 sentences).\n\
-             4. Default length: 180-450 Chinese characters unless the user explicitly asks for detail.\n\
-             5. If details are long, send a compact summary first, then ask whether to continue.\n\
-             Formatting rules for Telegram MarkdownV2:\n\
-             1. Format text for Telegram MarkdownV2. Do NOT use Markdown tables.\n\
-             2. Use Telegram-compatible bold as *bold* (single asterisks), not **bold**.\n\
-             3. Hyperlinks are allowed as [title](https://example.com), but bare URLs are preferred for reliability.\n\
-             4. Escape MarkdownV2 special characters when needed to avoid rendering errors.\n\
-             5. For tabular or aligned content, use fenced code blocks instead.\n\
-             6. Avoid fragile nested Markdown; keep formatting robust under message splitting.\n\
-             7. If MarkdownV2 rendering fails after splitting, plain text fallback is acceptable.\n\
-             CRITICAL RULES:\n\
-             1. NEVER fabricate or guess these markers. Only use paths/URLs returned by tools.\n\
-             2. When the tts tool returns a marker like <voice>/tmp/zerda_tts_xxx.ogg</voice>, include it EXACTLY as-is in your response.\n\
-             3. Never output these markers as examples, in explanations, or when a tool has failed.\n\
-             4. Place each marker on its own line.\n\
-             5. If you receive a system note about voice messages being unsupported (STT not configured), kindly inform the user that voice message recognition is currently unavailable."
-                .to_string(),
-        )
+        Some(TELEGRAM_PROMPT_SUPPLEMENT.trim_end().to_string())
     }
 
     async fn send_typing(&self, recipient: &str) -> Result<()> {

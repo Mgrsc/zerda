@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 
 use crate::config;
 
+const SYSTEM_RULES: &str = include_str!("prompts/system_rules.md");
+
 struct EnvInfo {
     os: String,
     shell: String,
@@ -21,24 +23,7 @@ pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&s
         parts.push(id.to_string());
     }
 
-    parts.push(
-        "## Rules\n\
-        - NEVER give time estimates or predictions\n\
-        - Always respond in the user's language\n\
-        - When you need to call a tool, call it directly without asking for permission\n\
-        - After editing zerda.toml, call the reload tool to apply the configuration\n\
-        - Record important information to MEMORY.md using the memory tool; read it when needed\n\
-        - After adding or removing MCP servers or skills, perform a light reload (/reload command)\n\
-        - Prefer the shortest path: do not build a perfect solution in one pass; get core results first\n\
-        - If a tool fails 2 times in a row, abandon that approach and switch to a simpler alternative or ask the user\n\
-        - Before each tool call, confirm it advances the goal; if not, stop and reassess\n\
-        - Do not repeatedly attempt the same approach for the same problem\n\
-        - Never run long-lived or blocking commands in the foreground (e.g., dev servers, file watchers, tail -f)\n\
-        - For long-running tasks, start them in the background with logs and report PID, log path, stop command, and a health check result\n\
-        - Foreground shell commands must be short-lived and bounded with an explicit timeout\n\
-        - If you are unsure whether a command may block, ask the user before running it"
-            .to_string(),
-    );
+    parts.push(SYSTEM_RULES.trim_end().to_string());
 
     let hostname = std::env::var("HOSTNAME")
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
