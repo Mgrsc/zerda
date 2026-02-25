@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::config::ModelRef;
 use crate::prompt;
-use crate::providers::{Role, Usage};
+use crate::providers::{Role, Usage, LIST_MODELS_UNSUPPORTED};
 use crate::runner::{self, HotState, RunContext};
 
 pub struct CommandInfo {
@@ -25,7 +25,7 @@ const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "model",
-        description: "Show or switch model",
+        description: "Show, switch, or list models",
     },
     CommandInfo {
         name: "status",
@@ -91,24 +91,65 @@ pub async fn try_handle_command(
             agent.history.clear();
             agent.total_usage = Usage::default();
             runner::refresh_prompt(agent, hot, None);
-            "Context cleared.".to_string()
+            "🧹 Context cleared".to_string()
         }
         "compact" => {
             let memory_dir = crate::config::resolve_path(crate::config::MEMORY_DIR);
             match agent.compress_with_llm(&memory_dir).await {
-                Ok(()) => "Context compressed with LLM.".to_string(),
-                Err(e) => format!("Compression failed: {e}"),
+                Ok(()) => "🗜️ Context compressed with LLM".to_string(),
+                Err(e) => format!("❌ Compression failed: {e}"),
             }
         }
         "model" => {
             if args.is_empty() {
-                let mut lines = vec![format!("Current model: {}", hot.active_model_ref)];
-                lines.push("Available providers:".to_string());
+                let mut lines = vec![
+                    "🤖 Current model".to_string(),
+                    format!("  • {}", hot.active_model_ref),
+                    String::new(),
+                    "🔌 Available providers".to_string(),
+                ];
                 for pid in hot.registry.list_provider_ids() {
-                    lines.push(format!("  - {pid}"));
+                    lines.push(format!("  • {pid}"));
                 }
-                lines.push("Usage: /model <provider_id>@<model_name>".to_string());
+                lines.push(String::new());
+                lines.push("🧭 Usage".to_string());
+                lines.push(format!("  • {}", model_usage_line_1()));
+                lines.push(format!("  • {}", model_usage_line_2()));
                 lines.join("\n")
+            } else if let Some(provider_id) = parse_model_list_command_args(args) {
+                tracing::info!("Model list requested for provider: {provider_id}");
+                match hot.registry.get_or_create(provider_id) {
+                    Ok(provider) => match provider.list_models().await {
+                        Ok(mut models) => {
+                            models.sort();
+                            models.dedup();
+                            if models.is_empty() {
+                                format!(
+                                    "📭 Provider '{provider_id}' returned no models from listmodel interface."
+                                )
+                            } else {
+                                let mut lines = vec![format!(
+                                    "📚 Supported models for '{provider_id}' ({count})",
+                                    count = models.len()
+                                )];
+                                lines
+                                    .extend(models.into_iter().map(|model| format!("  • {model}")));
+                                lines.join("\n")
+                            }
+                        }
+                        Err(e) => {
+                            let message = e.to_string();
+                            if is_list_models_unsupported_error(&message) {
+                                format!(
+                                    "⚠️ Provider '{provider_id}' does not support listmodel interface."
+                                )
+                            } else {
+                                format!("❌ Failed to list models for '{provider_id}': {message}")
+                            }
+                        }
+                    },
+                    Err(e) => format!("❌ Failed to switch provider: {e}"),
+                }
             } else {
                 match ModelRef::parse(args) {
                     Ok(model_ref) => match hot.registry.get_or_create(&model_ref.provider_id) {
@@ -116,12 +157,14 @@ pub async fn try_handle_command(
                             hot.active_provider = provider;
                             hot.chat_opts.model = model_ref.model_name.clone();
                             hot.active_model_ref = model_ref;
-                            format!("Model switched to: {}", hot.active_model_ref)
+                            format!("✅ Model switched to: {}", hot.active_model_ref)
                         }
-                        Err(e) => format!("Failed to switch provider: {e}"),
+                        Err(e) => format!("❌ Failed to switch provider: {e}"),
                     },
                     Err(e) => format!(
-                        "Invalid model format: {e}\nUsage: /model <provider_id>@<model_name>"
+                        "❌ Invalid model format: {e}\n🧭 Usage\n  • {}\n  • {}",
+                        model_usage_line_1(),
+                        model_usage_line_2()
                     ),
                 }
             }
@@ -204,15 +247,19 @@ pub async fn try_handle_command(
             }
             rows.push(format!("└{}┘", "─".repeat(W + 2)));
 
-            format!("```\n{}\n```", rows.join("\n"))
+            format!("📊 Session status\n```\n{}\n```", rows.join("\n"))
         }
-        "help" => COMMANDS
-            .iter()
-            .map(|c| format!("/{:<9} - {}", c.name, c.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        "cancel" => "No running turn to cancel".to_string(),
-        _ => "Unknown command. Type /help for available commands.".to_string(),
+        "help" => {
+            let mut lines = vec!["🧭 Available commands".to_string()];
+            lines.extend(
+                COMMANDS
+                    .iter()
+                    .map(|c| format!("  • /{:<9} - {}", c.name, c.description)),
+            );
+            lines.join("\n")
+        }
+        "cancel" => "⏹️ No running turn to cancel".to_string(),
+        _ => "❓ Unknown command\n💡 Type /help for available commands".to_string(),
     };
 
     CommandResult::Handled(response)
@@ -228,4 +275,37 @@ fn fmt_thousands(n: u64) -> String {
         result.push(c);
     }
     result
+}
+
+fn parse_model_list_command_args(args: &str) -> Option<&str> {
+    let mut parts = args.split_whitespace();
+    let provider_id = parts.next()?;
+    let action = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if action.eq_ignore_ascii_case("list") {
+        Some(provider_id)
+    } else {
+        None
+    }
+}
+
+fn model_usage_line_1() -> &'static str {
+    "/model <provider_id>@<model_name>"
+}
+
+fn model_usage_line_2() -> &'static str {
+    "/model <provider_id> list"
+}
+
+fn is_list_models_unsupported_error(message: &str) -> bool {
+    if message.contains(LIST_MODELS_UNSUPPORTED) {
+        return true;
+    }
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("(404")
+        || normalized.contains("(405")
+        || normalized.contains("not found")
+        || normalized.contains("method not allowed")
 }
