@@ -25,7 +25,7 @@ pub struct SubAgentTool {
 
 impl SubAgentTool {
     pub fn new(provider: Arc<dyn Provider>, mut chat_opts: ChatOptions, tool_timeout: u64) -> Self {
-        chat_opts.max_tokens = MAX_TOKENS;
+        chat_opts.max_tokens = Some(MAX_TOKENS);
         Self {
             provider,
             chat_opts,

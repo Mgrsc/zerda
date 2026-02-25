@@ -7,11 +7,11 @@ use serde_json::{json, Value};
 
 use super::{
     apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
-    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream,
-    truncate_for_log, ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse,
-    Role, SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
+    ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
+    StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
-use crate::config::ProviderConfig;
+use crate::config::ProviderEndpoint;
 
 pub struct OpenAiChatProvider {
     http: HttpClient,
@@ -26,9 +26,9 @@ struct PendingToolCall {
 }
 
 impl OpenAiChatProvider {
-    pub fn new(config: &ProviderConfig) -> Self {
+    pub fn new(endpoint: &ProviderEndpoint) -> Self {
         Self {
-            http: HttpClient::new(config, "https://api.openai.com/v1"),
+            http: HttpClient::new(endpoint, "https://api.openai.com/v1"),
         }
     }
 
@@ -109,11 +109,12 @@ impl OpenAiChatProvider {
 
         let mut body = json!({
             "model": opts.model,
-            "max_tokens": opts.max_tokens,
-            "temperature": opts.temperature,
-            "top_p": opts.top_p,
             "messages": api_messages
         });
+
+        if let Some(max_tokens) = opts.max_tokens {
+            body["max_tokens"] = json!(max_tokens);
+        }
 
         if !tools.is_empty() {
             let tool_defs: Vec<Value> = tools
@@ -219,7 +220,7 @@ impl Provider for OpenAiChatProvider {
         let url = format!("{}/chat/completions", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
         tracing::info!(
-            "OpenAI Chat: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "OpenAI Chat: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,
@@ -239,8 +240,8 @@ impl Provider for OpenAiChatProvider {
                     tracing::warn!(
                         model = %opts.model,
                         sampling_mode = ?sampling_mode,
-                        temperature = opts.temperature,
-                        top_p = opts.top_p,
+                        temperature = ?opts.temperature,
+                        top_p = ?opts.top_p,
                         error = %err,
                         "OpenAI Chat dual-sampling conflict; retrying with single sampling parameter"
                     );
@@ -276,7 +277,7 @@ impl Provider for OpenAiChatProvider {
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
         tracing::info!(
-            "OpenAI Chat stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "OpenAI Chat stream: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,

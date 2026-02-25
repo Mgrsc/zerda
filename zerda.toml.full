@@ -4,26 +4,30 @@
 # ${VAR} syntax expands environment variables at load time.
 # Define MCP servers in mcp.toml (see mcp.toml.example).
 
-[provider]
-name = "openai_chat"                    # required: openai_chat | openai_responses | anthropic
-api_key = "${OPENAI_API_KEY}"           # required
-base_url = ""                           # default: empty (use provider default endpoint)
-model = "${OPENAI_MODEL}"               # required
-temperature = 1.0
-top_p = 0.95
-max_tokens = 4096
-vision = true                           # whether to include image inputs
+# [providers.<id>] defines a provider endpoint.
+# <id> is user-defined and used in model references: /model <id>@<model_name>
 
-# [provider.extra_headers]
+[providers.openai]
+type = "openai_chat"                    # required: openai_chat | openai_responses | anthropic
+api_key = "${OPENAI_API_KEY}"           # required
+base_url = ""                           # API root up to version path, e.g. https://api.openai.com/v1
+                                        # the provider appends /chat/completions, /responses, or /messages
+                                        # leave empty to use the official default endpoint
+
+# [providers.openai.extra_headers]
 # "HTTP-Referer" = "https://example.com"
 # "X-Title" = "zerda"
 
-[provider.retry]
-max_retries = 3
-base_delay_ms = 2000
-max_delay_ms = 30000
-connect_timeout_secs = 10
-request_timeout_secs = 120
+# [providers.openai.retry]
+# max_retries = 3
+# base_delay_ms = 2000
+# max_delay_ms = 30000
+# connect_timeout_secs = 10
+# request_timeout_secs = 120
+
+# [providers.anthropic]
+# type = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
 
 [agent]
 max_iterations = 10                     # maximum tool calls per turn
@@ -37,20 +41,19 @@ max_memory_file_size = 102400           # maximum memory file size in bytes
 session_cleanup_days = 7                # auto-clean sessions older than N days
 tool_timeout = 300                      # tool execution timeout in seconds
 
-# Fast model (optional; falls back to main provider if omitted)
-# A cheaper/faster model for auxiliary tasks:
-#   - history compaction (conversation compression when context grows too long)
-#   - iteration fallback summary (when max_iterations is exhausted)
-#   - subagent tool (delegated sub-tasks and large output processing)
-# [agent.fast_model]
-# name = "openai_chat"                  # required when enabled
-# api_key = "${OPENAI_API_KEY}"         # required when enabled
-# base_url = ""                         # default
-# model = "${OPENAI_FAST_MODEL}"        # required when enabled
+[agent.primary_model]
+model = "openai@${OPENAI_MODEL}"        # required: provider_id@model_name
+vision = true                           # whether to send images to the model (default: true)
+# temperature = 1.0                     # optional; default: unset (API decides)
+# top_p = 1.0                           # optional; default: unset (API decides)
+# max_tokens = 4096                     # optional; default: unset (anthropic uses 4096)
+
+# [agent.fast_model]                    # optional; falls back to primary_model if omitted
+# model = "openai@gpt-5.3"
+# vision = false
 # temperature = 1.0
-# top_p = 0.95
+# top_p = 1.0
 # max_tokens = 4096
-# vision = true
 
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported

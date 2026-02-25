@@ -116,8 +116,23 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let provider = providers::create_provider(&cfg.provider)?;
-    let chat_opts = providers::ChatOptions::from_provider_config(&cfg.provider);
+    let mut registry = providers::ProviderRegistry::new(cfg.providers.clone())?;
+
+    let primary_ref = config::ModelRef::parse(&cfg.agent.primary_model.model)?;
+    let active_provider = registry.get_or_create(&primary_ref.provider_id)?;
+    let chat_opts = providers::ChatOptions::from_model_config(
+        &cfg.agent.primary_model,
+        &primary_ref.model_name,
+    );
+
+    let fast_mc = cfg
+        .agent
+        .fast_model
+        .as_ref()
+        .unwrap_or(&cfg.agent.primary_model);
+    let fast_ref = config::ModelRef::parse(&fast_mc.model)?;
+    let fast_provider = registry.get_or_create(&fast_ref.provider_id)?;
+    let fast_chat_opts = providers::ChatOptions::from_model_config(fast_mc, &fast_ref.model_name);
 
     let memory_dir = config::resolve_path(config::MEMORY_DIR);
     let mem = Arc::new(memory::Memory::new(memory_dir.join("memory")));
@@ -142,33 +157,8 @@ async fn main() -> Result<()> {
             stt::create_stt_provider(&cfg.stt)
         });
 
-    let fast_model_provider: (
-        std::sync::Arc<dyn providers::Provider>,
-        providers::ChatOptions,
-    ) = if let Some(ref fm_cfg) = cfg.agent.fast_model {
-        match providers::create_provider(&fm_cfg.provider) {
-            Ok(p) => {
-                let opts = providers::ChatOptions::from_provider_config(&fm_cfg.provider);
-                (Arc::from(p), opts)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to create fast_model provider, falling back to main provider: {e}"
-                );
-                let p = providers::create_provider(&cfg.provider)
-                    .expect("main provider already validated");
-                (Arc::from(p), chat_opts.clone())
-            }
-        }
-    } else {
-        let p = providers::create_provider(&cfg.provider).expect("main provider already validated");
-        (Arc::from(p), chat_opts.clone())
-    };
-
-    let subagent_provider = (
-        Arc::clone(&fast_model_provider.0),
-        fast_model_provider.1.clone(),
-    );
+    let compression_provider = (fast_provider.clone(), fast_chat_opts.clone());
+    let subagent_provider = (fast_provider, fast_chat_opts);
 
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
@@ -199,7 +189,6 @@ async fn main() -> Result<()> {
 
     let system_prompt = prompt::build_system_prompt(identity_text.as_deref(), None);
 
-    let compression_provider = (fast_model_provider.0, fast_model_provider.1);
     let mut agent = agent::Agent::new(
         cfg.agent.clone(),
         (
@@ -212,7 +201,6 @@ async fn main() -> Result<()> {
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
     let run_ctx = runner::RunContext {
-        provider: provider.as_ref(),
         mem: &mem,
         config_path: cli.config.clone(),
         reload_signal,
@@ -230,6 +218,9 @@ async fn main() -> Result<()> {
         builtin_count,
         chat_opts,
         compression_provider,
+        registry,
+        active_provider,
+        active_model_ref: primary_ref,
     };
 
     match cli.command {
@@ -244,7 +235,7 @@ async fn main() -> Result<()> {
             if let Some(msg) = message {
                 runner::prepare_user_turn(&mut agent, &hot, mem.as_ref(), msg, None, None);
                 let response = agent
-                    .run_turn(provider.as_ref(), &hot.tools, &hot.chat_opts)
+                    .run_turn(hot.active_provider.as_ref(), &hot.tools, &hot.chat_opts)
                     .await?;
                 println!("{}", channels::cli::sanitize_terminal_text(&response));
                 if let Err(e) = agent.save_session(&sessions_dir, None) {

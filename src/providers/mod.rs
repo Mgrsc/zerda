@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,7 +10,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{ProviderConfig, RetryConfig};
+use crate::config::{ProviderEndpoint, RetryConfig};
 use crate::logging::{summarize_json, summarize_text};
 
 pub mod anthropic;
@@ -197,18 +198,18 @@ pub fn build_openai_content_parts(
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
     pub model: String,
-    pub temperature: f64,
-    pub top_p: f64,
-    pub max_tokens: u32,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_tokens: Option<u32>,
 }
 
 impl ChatOptions {
-    pub fn from_provider_config(config: &ProviderConfig) -> Self {
+    pub fn from_model_config(mc: &crate::config::ModelConfig, model_name: &str) -> Self {
         Self {
-            model: config.model.clone(),
-            temperature: config.temperature,
-            top_p: config.top_p,
-            max_tokens: config.max_tokens,
+            model: model_name.to_string(),
+            temperature: mc.temperature,
+            top_p: mc.top_p,
+            max_tokens: mc.max_tokens,
         }
     }
 }
@@ -218,12 +219,13 @@ pub enum SamplingMode {
     Both,
     TemperatureOnly,
     TopPOnly,
+    None,
 }
 
 pub fn preferred_single_sampling_mode(opts: &ChatOptions) -> SamplingMode {
-    let temp_is_default = (opts.temperature - 1.0).abs() < 1e-9;
-    let top_p_is_default = (opts.top_p - 0.95).abs() < 1e-9;
-    if temp_is_default && !top_p_is_default {
+    let has_temp = opts.temperature.is_some();
+    let has_top_p = opts.top_p.is_some();
+    if !has_temp && has_top_p {
         SamplingMode::TopPOnly
     } else {
         SamplingMode::TemperatureOnly
@@ -231,10 +233,19 @@ pub fn preferred_single_sampling_mode(opts: &ChatOptions) -> SamplingMode {
 }
 
 pub fn initial_sampling_mode(model: &str, opts: &ChatOptions) -> SamplingMode {
+    let has_temp = opts.temperature.is_some();
+    let has_top_p = opts.top_p.is_some();
+    if !has_temp && !has_top_p {
+        return SamplingMode::None;
+    }
     if model.to_ascii_lowercase().contains("claude") {
         preferred_single_sampling_mode(opts)
-    } else {
+    } else if has_temp && has_top_p {
         SamplingMode::Both
+    } else if has_temp {
+        SamplingMode::TemperatureOnly
+    } else {
+        SamplingMode::TopPOnly
     }
 }
 
@@ -244,16 +255,28 @@ pub fn apply_sampling_mode(body: &mut Value, opts: &ChatOptions, mode: SamplingM
     };
     match mode {
         SamplingMode::Both => {
-            obj.insert("temperature".to_string(), serde_json::json!(opts.temperature));
-            obj.insert("top_p".to_string(), serde_json::json!(opts.top_p));
+            if let Some(t) = opts.temperature {
+                obj.insert("temperature".to_string(), serde_json::json!(t));
+            }
+            if let Some(p) = opts.top_p {
+                obj.insert("top_p".to_string(), serde_json::json!(p));
+            }
         }
         SamplingMode::TemperatureOnly => {
-            obj.insert("temperature".to_string(), serde_json::json!(opts.temperature));
+            if let Some(t) = opts.temperature {
+                obj.insert("temperature".to_string(), serde_json::json!(t));
+            }
             obj.remove("top_p");
         }
         SamplingMode::TopPOnly => {
-            obj.insert("top_p".to_string(), serde_json::json!(opts.top_p));
+            if let Some(p) = opts.top_p {
+                obj.insert("top_p".to_string(), serde_json::json!(p));
+            }
             obj.remove("temperature");
+        }
+        SamplingMode::None => {
+            obj.remove("temperature");
+            obj.remove("top_p");
         }
     }
 }
@@ -414,7 +437,7 @@ pub trait Provider: Send + Sync {
     }
 }
 
-type ProviderFactory = fn(&ProviderConfig) -> Result<Box<dyn Provider>>;
+type ProviderFactory = fn(&ProviderEndpoint) -> Result<Box<dyn Provider>>;
 
 const REGISTRY: &[(&str, ProviderFactory)] = &[
     ("anthropic", |c| {
@@ -428,13 +451,49 @@ const REGISTRY: &[(&str, ProviderFactory)] = &[
     }),
 ];
 
-pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn Provider>> {
+pub fn create_provider(endpoint: &ProviderEndpoint) -> Result<Box<dyn Provider>> {
     let factory = REGISTRY
         .iter()
-        .find(|(name, _)| *name == config.name)
+        .find(|(name, _)| *name == endpoint.kind)
         .map(|(_, f)| f)
-        .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", config.name))?;
-    factory(config)
+        .ok_or_else(|| anyhow::anyhow!("Unknown provider type: {}", endpoint.kind))?;
+    factory(endpoint)
+}
+
+pub struct ProviderRegistry {
+    endpoints: std::collections::HashMap<String, ProviderEndpoint>,
+    cache: std::collections::HashMap<String, Arc<dyn Provider>>,
+}
+
+impl ProviderRegistry {
+    pub fn new(endpoints: Vec<ProviderEndpoint>) -> Result<Self> {
+        let map: std::collections::HashMap<String, ProviderEndpoint> = endpoints
+            .into_iter()
+            .map(|ep| (ep.id.clone(), ep))
+            .collect();
+        Ok(Self {
+            endpoints: map,
+            cache: std::collections::HashMap::new(),
+        })
+    }
+
+    pub fn get_or_create(&mut self, provider_id: &str) -> Result<Arc<dyn Provider>> {
+        if let Some(cached) = self.cache.get(provider_id) {
+            return Ok(Arc::clone(cached));
+        }
+        let endpoint = self
+            .endpoints
+            .get(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown provider id: '{provider_id}'"))?;
+        let provider: Arc<dyn Provider> = Arc::from(create_provider(endpoint)?);
+        self.cache
+            .insert(provider_id.to_string(), Arc::clone(&provider));
+        Ok(provider)
+    }
+
+    pub fn list_provider_ids(&self) -> Vec<&str> {
+        self.endpoints.keys().map(String::as_str).collect()
+    }
 }
 
 pub struct HttpClient {
@@ -446,25 +505,25 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    pub fn new(config: &ProviderConfig, default_base_url: &str) -> Self {
-        let base_url = if config.base_url.is_empty() {
+    pub fn new(endpoint: &ProviderEndpoint, default_base_url: &str) -> Self {
+        let base_url = if endpoint.base_url.is_empty() {
             default_base_url.to_string()
         } else {
-            config.base_url.trim_end_matches('/').to_string()
+            endpoint.base_url.trim_end_matches('/').to_string()
         };
 
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(config.retry.connect_timeout_secs))
-            .timeout(Duration::from_secs(config.retry.request_timeout_secs))
+            .connect_timeout(Duration::from_secs(endpoint.retry.connect_timeout_secs))
+            .timeout(Duration::from_secs(endpoint.retry.request_timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
 
         Self {
             client,
-            api_key: config.api_key.clone(),
+            api_key: endpoint.api_key.clone(),
             base_url,
-            retry_config: config.retry.clone(),
-            extra_headers: config.extra_headers.clone(),
+            retry_config: endpoint.retry.clone(),
+            extra_headers: endpoint.extra_headers.clone(),
         }
     }
 

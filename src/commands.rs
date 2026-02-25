@@ -1,4 +1,5 @@
 use crate::agent::Agent;
+use crate::config::ModelRef;
 use crate::prompt;
 use crate::providers::{Role, Usage};
 use crate::runner::{self, HotState, RunContext};
@@ -97,10 +98,28 @@ pub async fn try_handle_command(
         }
         "model" => {
             if args.is_empty() {
-                format!("Current model: {}", hot.chat_opts.model)
+                let mut lines = vec![format!("Current model: {}", hot.active_model_ref)];
+                lines.push("Available providers:".to_string());
+                for pid in hot.registry.list_provider_ids() {
+                    lines.push(format!("  - {pid}"));
+                }
+                lines.push("Usage: /model <provider_id>@<model_name>".to_string());
+                lines.join("\n")
             } else {
-                hot.chat_opts.model = args.to_string();
-                format!("Model switched to: {args}")
+                match ModelRef::parse(args) {
+                    Ok(model_ref) => match hot.registry.get_or_create(&model_ref.provider_id) {
+                        Ok(provider) => {
+                            hot.active_provider = provider;
+                            hot.chat_opts.model = model_ref.model_name.clone();
+                            hot.active_model_ref = model_ref;
+                            format!("Model switched to: {}", hot.active_model_ref)
+                        }
+                        Err(e) => format!("Failed to switch provider: {e}"),
+                    },
+                    Err(e) => format!(
+                        "Invalid model format: {e}\nUsage: /model <provider_id>@<model_name>"
+                    ),
+                }
             }
         }
         "status" => {
@@ -117,10 +136,16 @@ pub async fn try_handle_command(
             let os_name = prompt::read_os_pretty_name();
             let shell = prompt::read_default_shell();
             let platform = std::env::consts::OS;
-            let provider_name = &hot.cfg.provider.name;
-            let model = &hot.chat_opts.model;
-            let temp = hot.chat_opts.temperature;
-            let top_p = hot.chat_opts.top_p;
+            let provider_name = &hot.active_model_ref.provider_id;
+            let model = &hot.active_model_ref.model_name;
+            let temp = hot
+                .chat_opts
+                .temperature
+                .map_or("auto".to_string(), |v| format!("{v}"));
+            let top_p = hot
+                .chat_opts
+                .top_p
+                .map_or("auto".to_string(), |v| format!("{v}"));
             let tool_total = hot.tools.len();
             let builtin = hot.builtin_count;
             let mcp = tool_total - builtin;

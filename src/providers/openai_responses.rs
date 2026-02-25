@@ -6,20 +6,20 @@ use std::collections::HashMap;
 
 use super::{
     apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
-    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream,
-    truncate_for_log, ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse,
-    Role, SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
+    ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
+    StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
-use crate::config::ProviderConfig;
+use crate::config::ProviderEndpoint;
 
 pub struct OpenAiResponsesProvider {
     http: HttpClient,
 }
 
 impl OpenAiResponsesProvider {
-    pub fn new(config: &ProviderConfig) -> Self {
+    pub fn new(endpoint: &ProviderEndpoint) -> Self {
         Self {
-            http: HttpClient::new(config, "https://api.openai.com/v1"),
+            http: HttpClient::new(endpoint, "https://api.openai.com/v1"),
         }
     }
 
@@ -95,11 +95,12 @@ impl OpenAiResponsesProvider {
 
         let mut body = json!({
             "model": opts.model,
-            "max_output_tokens": opts.max_tokens,
-            "temperature": opts.temperature,
-            "top_p": opts.top_p,
             "input": input
         });
+
+        if let Some(max_tokens) = opts.max_tokens {
+            body["max_output_tokens"] = json!(max_tokens);
+        }
 
         if let Some(inst) = instructions {
             body["instructions"] = json!(inst);
@@ -217,7 +218,7 @@ impl Provider for OpenAiResponsesProvider {
         let url = format!("{}/responses", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
         tracing::info!(
-            "OpenAI Responses: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "OpenAI Responses: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,
@@ -236,8 +237,8 @@ impl Provider for OpenAiResponsesProvider {
                     tracing::warn!(
                         model = %opts.model,
                         sampling_mode = ?sampling_mode,
-                        temperature = opts.temperature,
-                        top_p = opts.top_p,
+                        temperature = ?opts.temperature,
+                        top_p = ?opts.top_p,
                         error = %err,
                         "OpenAI Responses dual-sampling conflict; retrying with single sampling parameter"
                     );
@@ -267,7 +268,7 @@ impl Provider for OpenAiResponsesProvider {
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
         tracing::info!(
-            "OpenAI Responses stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "OpenAI Responses stream: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,

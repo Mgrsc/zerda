@@ -10,16 +10,16 @@ use super::{
     ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode, StreamEvent,
     StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
-use crate::config::ProviderConfig;
+use crate::config::ProviderEndpoint;
 
 pub struct AnthropicProvider {
     http: HttpClient,
 }
 
 impl AnthropicProvider {
-    pub fn new(config: &ProviderConfig) -> Self {
+    pub fn new(endpoint: &ProviderEndpoint) -> Self {
         Self {
-            http: HttpClient::new(config, "https://api.anthropic.com/v1"),
+            http: HttpClient::new(endpoint, "https://api.anthropic.com/v1"),
         }
     }
 
@@ -91,11 +91,14 @@ impl AnthropicProvider {
 
         let mut body = json!({
             "model": opts.model,
-            "max_tokens": opts.max_tokens,
-            "temperature": opts.temperature,
-            "top_p": opts.top_p,
             "messages": merged
         });
+
+        if let Some(max_tokens) = opts.max_tokens {
+            body["max_tokens"] = json!(max_tokens);
+        } else {
+            body["max_tokens"] = json!(4096);
+        }
 
         if !system_text.is_empty() {
             body["system"] = json!(system_text);
@@ -278,13 +281,17 @@ impl Provider for AnthropicProvider {
             ("anthropic-version", "2023-06-01".to_string()),
         ];
         tracing::info!(
-            "Anthropic chat: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "Anthropic chat: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,
             opts.top_p
         );
-        let resp_body = match self.http.send_request(&url, &headers, &body, "Anthropic").await {
+        let resp_body = match self
+            .http
+            .send_request(&url, &headers, &body, "Anthropic")
+            .await
+        {
             Ok(resp) => resp,
             Err(err) => {
                 if sampling_mode == SamplingMode::Both && is_dual_sampling_conflict_error(&err) {
@@ -293,8 +300,8 @@ impl Provider for AnthropicProvider {
                     tracing::warn!(
                         model = %opts.model,
                         sampling_mode = ?sampling_mode,
-                        temperature = opts.temperature,
-                        top_p = opts.top_p,
+                        temperature = ?opts.temperature,
+                        top_p = ?opts.top_p,
                         error = %err,
                         "Anthropic dual-sampling conflict; retrying with single sampling parameter"
                     );
@@ -327,7 +334,7 @@ impl Provider for AnthropicProvider {
         ];
 
         tracing::info!(
-            "Anthropic stream: model={}, sampling_mode={:?}, temperature={}, top_p={}",
+            "Anthropic stream: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
             opts.temperature,

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -12,7 +13,8 @@ pub const MEMORY_DIR: &str = "~/.zerda";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub provider: ProviderConfig,
+    #[serde(deserialize_with = "deserialize_providers")]
+    pub providers: Vec<ProviderEndpoint>,
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: Vec<McpServerConfig>,
@@ -69,44 +71,43 @@ const fn default_request_timeout_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ProviderConfig {
-    pub name: String,
+pub struct ProviderEndpoint {
+    #[serde(skip)]
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
     pub api_key: String,
-    #[serde(default = "default_base_url")]
+    #[serde(default)]
     pub base_url: String,
-    pub model: String,
-    #[serde(default = "default_temperature")]
-    pub temperature: f64,
-    #[serde(default = "default_top_p")]
-    pub top_p: f64,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    #[serde(default = "default_true")]
-    pub vision: bool,
     #[serde(default)]
     pub extra_headers: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub retry: RetryConfig,
 }
 
-const fn default_base_url() -> String {
-    String::new()
-}
-const fn default_temperature() -> f64 {
-    1.0
-}
-const fn default_top_p() -> f64 {
-    0.95
-}
-const fn default_max_tokens() -> u32 {
-    4096
-}
 const fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelConfig {
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub vision: bool,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
+    pub primary_model: ModelConfig,
+    #[serde(default)]
+    pub fast_model: Option<ModelConfig>,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
     #[serde(default = "default_max_history")]
@@ -117,7 +118,6 @@ pub struct AgentConfig {
     pub max_memory_tokens: usize,
     #[serde(default = "default_identity_path")]
     pub identity_path: String,
-    pub fast_model: Option<FastModelConfig>,
     #[serde(default)]
     pub show_usage: bool,
     #[serde(default)]
@@ -155,12 +155,6 @@ const fn default_session_cleanup_days() -> u64 {
 }
 const fn default_tool_timeout() -> u64 {
     300
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct FastModelConfig {
-    #[serde(flatten)]
-    pub provider: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,6 +267,38 @@ fn substitute_env_vars(input: &str) -> String {
     .to_string()
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model_name: String,
+}
+
+impl ModelRef {
+    pub fn parse(s: &str) -> Result<Self> {
+        let (provider_id, model_name) = s.split_once('@').ok_or_else(|| {
+            anyhow::anyhow!("Invalid model reference '{s}': expected 'provider_id@model_name'")
+        })?;
+        anyhow::ensure!(
+            !provider_id.is_empty(),
+            "provider_id must not be empty in '{s}'"
+        );
+        anyhow::ensure!(
+            !model_name.is_empty(),
+            "model_name must not be empty in '{s}'"
+        );
+        Ok(Self {
+            provider_id: provider_id.to_string(),
+            model_name: model_name.to_string(),
+        })
+    }
+}
+
+impl fmt::Display for ModelRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.provider_id, self.model_name)
+    }
+}
+
 pub fn resolve_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -329,29 +355,59 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
     Ok(config)
 }
 
+fn deserialize_providers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<ProviderEndpoint>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map: std::collections::HashMap<String, ProviderEndpoint> =
+        serde::Deserialize::deserialize(deserializer)?;
+    Ok(map
+        .into_iter()
+        .map(|(id, mut ep)| {
+            ep.id = id;
+            ep
+        })
+        .collect())
+}
+
 fn validate_config(config: &Config) -> Result<()> {
     anyhow::ensure!(
-        !config.provider.api_key.is_empty(),
-        "provider.api_key must not be empty"
+        !config.providers.is_empty(),
+        "At least one [providers.*] entry is required"
     );
+
+    for ep in &config.providers {
+        anyhow::ensure!(
+            !ep.api_key.is_empty(),
+            "providers.{}.api_key must not be empty",
+            ep.id
+        );
+    }
+
+    let provider_ids: std::collections::HashSet<&str> =
+        config.providers.iter().map(|p| p.id.as_str()).collect();
+
+    let primary =
+        ModelRef::parse(&config.agent.primary_model.model).context("agent.primary_model.model")?;
     anyhow::ensure!(
-        !config.provider.model.is_empty(),
-        "provider.model must not be empty"
+        provider_ids.contains(primary.provider_id.as_str()),
+        "agent.primary_model references unknown provider '{}'",
+        primary.provider_id
     );
-    anyhow::ensure!(
-        (0.0..=2.0).contains(&config.provider.temperature),
-        "temperature must be between 0.0 and 2.0, got {}",
-        config.provider.temperature
-    );
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&config.provider.top_p),
-        "top_p must be between 0.0 and 1.0, got {}",
-        config.provider.top_p
-    );
-    anyhow::ensure!(
-        config.provider.max_tokens > 0,
-        "max_tokens must be greater than 0"
-    );
+    validate_model_config(&config.agent.primary_model, "agent.primary_model")?;
+
+    if let Some(ref fm) = config.agent.fast_model {
+        let fast = ModelRef::parse(&fm.model).context("agent.fast_model.model")?;
+        anyhow::ensure!(
+            provider_ids.contains(fast.provider_id.as_str()),
+            "agent.fast_model references unknown provider '{}'",
+            fast.provider_id
+        );
+        validate_model_config(fm, "agent.fast_model")?;
+    }
+
     anyhow::ensure!(
         config.agent.max_iterations >= MIN_MAX_ITERATIONS,
         "max_iterations must be greater than or equal to {}",
@@ -369,6 +425,25 @@ fn validate_config(config: &Config) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_model_config(mc: &ModelConfig, label: &str) -> Result<()> {
+    if let Some(temp) = mc.temperature {
+        anyhow::ensure!(
+            (0.0..=2.0).contains(&temp),
+            "{label}.temperature must be between 0.0 and 2.0, got {temp}"
+        );
+    }
+    if let Some(top_p) = mc.top_p {
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&top_p),
+            "{label}.top_p must be between 0.0 and 1.0, got {top_p}"
+        );
+    }
+    if let Some(max_tokens) = mc.max_tokens {
+        anyhow::ensure!(max_tokens > 0, "{label}.max_tokens must be greater than 0");
+    }
     Ok(())
 }
 

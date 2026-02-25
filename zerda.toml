@@ -1,22 +1,32 @@
-[provider]
-name = "openai_chat"                    # openai_chat | openai_responses | anthropic
+# [providers.<id>] defines a provider endpoint.
+# <id> is user-defined and used in model references: /model <id>@<model_name>
+
+[providers.openai]
+type = "openai_chat"                    # API protocol: openai_chat | openai_responses | anthropic
 api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"         # leave empty to use the provider default endpoint
-model = "${OPENAI_MODEL}"
-vision = true                           # whether to include image inputs
+base_url = "${OPENAI_BASE_URL}"         # API root up to version path, e.g. https://api.openai.com/v1
+                                        # the provider appends /chat/completions, /responses, or /messages
+                                        # leave empty to use the official default endpoint
 
+# [providers.anthropic]
+# type = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
 
-# Fast model (optional; falls back to main provider if omitted)
-# A cheaper/faster model for auxiliary tasks:
-#   - history compaction (conversation compression when context grows too long)
-#   - iteration fallback summary (when max_iterations is exhausted)
-#   - subagent tool (delegated sub-tasks and large output processing)
-# [agent.fast_model]
-# name = "openai_chat"
-# api_key = "${OPENAI_API_KEY}"
-# base_url = "${OPENAI_BASE_URL}"
-# model = "${OPENAI_FAST_MODEL}"
+[agent]
+
+[agent.primary_model]
+model = "openai@${OPENAI_MODEL}"        # <provider_id>@<model_name>
+vision = true                           # whether to send images to the model (default: true)
+# temperature = 1.0                     # optional; default: unset (API decides)
+# top_p = 1.0                           # optional; default: unset (API decides)
+# max_tokens = 4096                     # optional; default: unset (anthropic uses 4096)
+
+# [agent.fast_model]                    # optional; falls back to primary_model if omitted
+# model = "openai@gpt-4o-mini"
 # vision = false
+# temperature = 1.0
+# top_p = 1.0
+# max_tokens = 4096
 
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported

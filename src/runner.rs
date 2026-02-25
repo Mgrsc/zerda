@@ -15,11 +15,11 @@ use uuid::Uuid;
 use crate::agent;
 use crate::channels::{self, Channel};
 use crate::commands;
-use crate::config::{self, Config};
+use crate::config::{self, Config, ModelRef};
 use crate::identity;
 use crate::memory::Memory;
 use crate::prompt::build_system_prompt;
-use crate::providers::{self, ChatOptions, ContentPart};
+use crate::providers::{self, ChatOptions, ContentPart, ProviderRegistry};
 use crate::rich_content;
 use crate::skills::{self, Skill};
 use crate::stt::SttProvider;
@@ -27,7 +27,6 @@ use crate::tools;
 use crate::tools::reload::ReloadSignal;
 
 pub struct RunContext<'a> {
-    pub provider: &'a dyn providers::Provider,
     pub mem: &'a Memory,
     pub config_path: Option<PathBuf>,
     pub reload_signal: ReloadSignal,
@@ -45,6 +44,9 @@ pub struct HotState {
     pub builtin_count: usize,
     pub chat_opts: ChatOptions,
     pub compression_provider: (Arc<dyn providers::Provider>, ChatOptions),
+    pub registry: ProviderRegistry,
+    pub active_provider: Arc<dyn providers::Provider>,
+    pub active_model_ref: ModelRef,
 }
 
 pub(crate) fn refresh_prompt(
@@ -145,7 +147,7 @@ pub(crate) fn prepare_user_turn(
     let user_msg = build_user_message(
         content,
         content_parts,
-        hot.cfg.provider.vision,
+        hot.cfg.agent.primary_model.vision,
         &hot.skills,
         user_ctx.as_deref(),
         summary.as_deref(),
@@ -195,27 +197,25 @@ fn retry_config_equal(a: &config::RetryConfig, b: &config::RetryConfig) -> bool 
         && a.request_timeout_secs == b.request_timeout_secs
 }
 
-fn provider_config_equal(a: &config::ProviderConfig, b: &config::ProviderConfig) -> bool {
-    a.name == b.name
-        && a.api_key == b.api_key
-        && a.base_url == b.base_url
-        && a.model == b.model
-        && a.temperature == b.temperature
-        && a.max_tokens == b.max_tokens
-        && a.vision == b.vision
-        && a.extra_headers == b.extra_headers
-        && retry_config_equal(&a.retry, &b.retry)
+fn provider_endpoints_equal(
+    a: &[config::ProviderEndpoint],
+    b: &[config::ProviderEndpoint],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).all(|(x, y)| {
+        x.id == y.id
+            && x.kind == y.kind
+            && x.api_key == y.api_key
+            && x.base_url == y.base_url
+            && x.extra_headers == y.extra_headers
+            && retry_config_equal(&x.retry, &y.retry)
+    })
 }
 
-fn fast_model_equal(
-    a: &Option<config::FastModelConfig>,
-    b: &Option<config::FastModelConfig>,
-) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => provider_config_equal(&x.provider, &y.provider),
-        _ => false,
-    }
+fn agent_model_fields_equal(a: &config::AgentConfig, b: &config::AgentConfig) -> bool {
+    a.primary_model == b.primary_model && a.fast_model == b.fast_model
 }
 
 fn channel_config_equal(a: &config::ChannelConfig, b: &config::ChannelConfig) -> bool {
@@ -244,8 +244,11 @@ fn log_config_equal(a: &config::LogConfig, b: &config::LogConfig) -> bool {
 fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     let mut blockers = Vec::new();
 
-    if !provider_config_equal(&old_cfg.provider, &new_cfg.provider) {
-        blockers.push("provider.*".to_string());
+    if !provider_endpoints_equal(&old_cfg.providers, &new_cfg.providers) {
+        blockers.push("providers.*".to_string());
+    }
+    if !agent_model_fields_equal(&old_cfg.agent, &new_cfg.agent) {
+        blockers.push("agent.model/sampling".to_string());
     }
     if !channels_equal(&old_cfg.channels, &new_cfg.channels) {
         blockers.push("channels".to_string());
@@ -271,9 +274,6 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     }
     if old_cfg.agent.max_memory_tokens != new_cfg.agent.max_memory_tokens {
         blockers.push("agent.max_memory_tokens".to_string());
-    }
-    if !fast_model_equal(&old_cfg.agent.fast_model, &new_cfg.agent.fast_model) {
-        blockers.push("agent.fast_model".to_string());
     }
     if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
         blockers.push("agent.show_usage".to_string());
@@ -437,7 +437,7 @@ pub async fn run_interactive(
         {
             let mut rx_closed = false;
             let run_turn = agent.run_turn_stream(
-                ctx.provider,
+                hot.active_provider.as_ref(),
                 &hot.tools,
                 &hot.chat_opts,
                 |delta| {
@@ -608,7 +608,7 @@ pub async fn run_serve(
                     refresh_prompt(&mut notify_agent, hot, supplement.as_deref());
 
                     let response = match notify_agent
-                        .run_turn(ctx.provider, &hot.tools, &hot.chat_opts)
+                        .run_turn(hot.active_provider.as_ref(), &hot.tools, &hot.chat_opts)
                         .await
                     {
                         Ok(r) => r,
@@ -812,7 +812,7 @@ pub async fn run_serve(
         if !cancelled {
             let run_turn = session_agent
                 .run_turn_stream(
-                    ctx.provider,
+                    hot.active_provider.as_ref(),
                     &hot.tools,
                     &hot.chat_opts,
                     |_| {},
