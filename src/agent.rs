@@ -190,6 +190,7 @@ impl Agent {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: serde_json::json!({}),
+                    extra_content: None,
                 })
                 .collect();
 
@@ -347,7 +348,7 @@ impl Agent {
         let mut text_buf = String::new();
         let mut reasoning_buf = String::new();
         let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
-        let mut tool_starts: Vec<(String, String)> = Vec::new();
+        let mut tool_starts: Vec<(String, String, Option<serde_json::Value>)> = Vec::new();
         let mut tool_args: HashMap<String, String> = HashMap::new();
         let mut usage = Usage::default();
 
@@ -357,8 +358,12 @@ impl Agent {
                     on_text(&delta);
                     text_buf.push_str(&delta);
                 }
-                StreamEvent::ToolCallStart { id, name } => {
-                    tool_starts.push((id.clone(), name));
+                StreamEvent::ToolCallStart {
+                    id,
+                    name,
+                    extra_content,
+                } => {
+                    tool_starts.push((id.clone(), name, extra_content));
                     tool_args.entry(id).or_default();
                 }
                 StreamEvent::ToolCallDelta { id, args_chunk } => {
@@ -395,13 +400,14 @@ impl Agent {
 
         let mut tool_calls = Vec::new();
         let mut parse_errors = Vec::new();
-        for (id, name) in tool_starts {
+        for (id, name, extra_content) in tool_starts {
             let raw = tool_args.remove(&id).unwrap_or_default();
             match serde_json::from_str(&raw) {
                 Ok(arguments) => tool_calls.push(ToolCall {
                     id,
                     name,
                     arguments,
+                    extra_content,
                 }),
                 Err(e) => {
                     tracing::warn!(

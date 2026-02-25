@@ -224,6 +224,7 @@ impl AnthropicProvider {
                             id,
                             name,
                             arguments,
+                            extra_content: None,
                         });
                     }
                     _ => {}
@@ -459,7 +460,11 @@ fn parse_sse_event(block: &str, state: &mut AnthropicStreamState) -> Vec<Result<
                     let name = name.to_string();
                     state.current_tool_id.clone_from(&id);
                     tracing::info!("Anthropic tool call start: {name}");
-                    vec![Ok(StreamEvent::ToolCallStart { id, name })]
+                    vec![Ok(StreamEvent::ToolCallStart {
+                        id,
+                        name,
+                        extra_content: None,
+                    })]
                 }
                 "thinking" => {
                     let pending = state.pending_thinking.entry(index).or_default();

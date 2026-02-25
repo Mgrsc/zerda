@@ -112,6 +112,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,8 +307,15 @@ pub struct ProviderResponse {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { id: String, args_chunk: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+        extra_content: Option<Value>,
+    },
+    ToolCallDelta {
+        id: String,
+        args_chunk: String,
+    },
     AssistantMeta(Value),
     Done(Usage),
 }
@@ -426,6 +435,7 @@ pub trait Provider: Send + Sync {
             events.push(Ok(StreamEvent::ToolCallStart {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
+                extra_content: tc.extra_content.clone(),
             }));
             events.push(Ok(StreamEvent::ToolCallDelta {
                 id: tc.id.clone(),

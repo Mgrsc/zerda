@@ -164,6 +164,7 @@ impl OpenAiResponsesProvider {
                             id: call_id,
                             name,
                             arguments,
+                            extra_content: None,
                         });
                     }
                     _ => {}
@@ -364,7 +365,11 @@ fn parse_responses_sse(
             }
             state.insert("_last".to_string(), call_id.clone());
             tracing::info!("OpenAI Responses tool call start: {name}");
-            Some(Ok(StreamEvent::ToolCallStart { id: call_id, name }))
+            Some(Ok(StreamEvent::ToolCallStart {
+                id: call_id,
+                name,
+                extra_content: None,
+            }))
         }
         "response.function_call_arguments.delta" => {
             let chunk = data.get("delta")?.as_str()?.to_string();
