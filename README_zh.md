@@ -152,7 +152,9 @@ Zerda 提供了功能丰富的命令行接口：
 在交互式对话模式中，你可以输入以下 `/` 开头的快捷命令：
 
 - `/help`：显示所有可用的快捷命令。
-- `/model [provider_id@model_name]`：查看当前使用的模型，或即时切换到新模型（例如 `/model openai@gpt-4o`）。
+- `/model`：查看当前激活模型与可用 provider 列表。
+- `/model <provider_id>@<model_name>`：即时切换到新模型（例如 `/model openai@gpt-4o`）。
+- `/model <provider_id> list`：列出指定 provider 支持的模型（例如 `/model openai list`）。
 - `/clear`：清空当前会话的历史记录。
 - `/compact`：强制触发 LLM 进行上下文压缩。
 - `/status`：查看当前的 Token 用量、预算限制及系统状态。

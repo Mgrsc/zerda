@@ -152,7 +152,9 @@ Zerda provides a powerful command-line interface:
 While in the interactive chat mode, you can use the following commands:
 
 - `/help`: Show available commands.
-- `/model [provider_id@model_name]`: View the current model or switch to a new one instantly (e.g., `/model openai@gpt-4o`).
+- `/model`: View the current active model and available providers.
+- `/model <provider_id>@<model_name>`: Switch to a new model instantly (e.g., `/model openai@gpt-4o`).
+- `/model <provider_id> list`: List models supported by the target provider (e.g., `/model openai list`).
 - `/clear`: Clear the current session history.
 - `/compact`: Force context compression using the LLM.
 - `/status`: Display token usage, budget, and system status.
