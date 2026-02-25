@@ -16,6 +16,7 @@ use crate::logging::{summarize_json, summarize_text};
 pub mod anthropic;
 pub mod openai_chat;
 pub mod openai_responses;
+pub const LIST_MODELS_UNSUPPORTED: &str = "listmodel interface is not supported by this provider";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Role {
@@ -445,6 +446,10 @@ pub trait Provider: Send + Sync {
         events.push(Ok(StreamEvent::Done(usage.unwrap_or_default())));
         Ok(Box::pin(futures::stream::iter(events)))
     }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Err(anyhow::anyhow!(LIST_MODELS_UNSUPPORTED))
+    }
 }
 
 type ProviderFactory = fn(&ProviderEndpoint) -> Result<Box<dyn Provider>>;
@@ -569,6 +574,40 @@ impl HttpClient {
                 .unwrap_or("Unknown error");
             anyhow::bail!("{provider_name} API error ({status}): {error_msg}");
         }
+
+        Ok(resp_body)
+    }
+
+    pub async fn send_get_request(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+        provider_name: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .send_get_with_retry(url, headers, provider_name)
+            .await?;
+
+        let status = resp.status();
+        let raw_text = resp
+            .text()
+            .await
+            .with_context(|| format!("Failed to read {provider_name} response"))?;
+
+        if !status.is_success() {
+            let error_msg = serde_json::from_str::<Value>(&raw_text)
+                .ok()
+                .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                .unwrap_or_else(|| summarize_text(&raw_text).to_string());
+            anyhow::bail!("{provider_name} API error ({status}): {error_msg}");
+        }
+
+        let resp_body: Value = serde_json::from_str(&raw_text).with_context(|| {
+            format!(
+                "Failed to parse {provider_name} response: {}",
+                summarize_text(&raw_text)
+            )
+        })?;
 
         Ok(resp_body)
     }
@@ -717,6 +756,115 @@ impl HttpClient {
             .unwrap_or_else(|| anyhow::anyhow!("{provider_name} request failed after retries")))
     }
 
+    async fn send_get_with_retry(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+        provider_name: &str,
+    ) -> Result<reqwest::Response> {
+        let mut last_error: Option<anyhow::Error> = None;
+
+        tracing::debug!(provider = provider_name, url = %url, "Provider GET request");
+
+        for attempt in 0..=self.retry_config.max_retries {
+            let attempt_started = Instant::now();
+            if attempt > 0 {
+                let delay = self.compute_backoff(attempt, None);
+                tracing::info!(
+                    provider = provider_name,
+                    attempt,
+                    max_retries = self.retry_config.max_retries,
+                    delay_ms = delay,
+                    "Provider retry scheduled"
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+
+            let mut req = self.client.get(url);
+            for (key, value) in headers {
+                req = req.header(*key, value);
+            }
+            for (key, value) in &self.extra_headers {
+                req = req.header(key, value);
+            }
+
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if e.is_timeout() || e.is_connect() {
+                        tracing::warn!(
+                            provider = provider_name,
+                            attempt,
+                            elapsed_ms = attempt_started.elapsed().as_millis(),
+                            "Provider network error: {e}"
+                        );
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                    return Err(e).with_context(|| format!("{provider_name} API request failed"));
+                }
+            };
+
+            let status = resp.status();
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let raw_text = resp.text().await.unwrap_or_default();
+                let error_msg = serde_json::from_str::<Value>(&raw_text)
+                    .ok()
+                    .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("Rate limited. Raw: {}", summarize_text(&raw_text)));
+                tracing::warn!(
+                    provider = provider_name,
+                    attempt,
+                    elapsed_ms = attempt_started.elapsed().as_millis(),
+                    "Provider rate limited: {error_msg}"
+                );
+                let delay = self.compute_backoff(attempt + 1, retry_after.map(|s| s * 1000));
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                last_error = Some(anyhow::anyhow!(
+                    "{provider_name} API error ({status}): {error_msg}"
+                ));
+                continue;
+            }
+
+            if status.is_server_error() {
+                let raw_text = resp.text().await.unwrap_or_default();
+                let error_msg = serde_json::from_str::<Value>(&raw_text)
+                    .ok()
+                    .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("Server error. Raw: {}", summarize_text(&raw_text)));
+                tracing::warn!(
+                    provider = provider_name,
+                    status = %status,
+                    attempt,
+                    elapsed_ms = attempt_started.elapsed().as_millis(),
+                    "Provider server error: {error_msg}"
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "{provider_name} API error ({status}): {error_msg}"
+                ));
+                continue;
+            }
+
+            tracing::debug!(
+                provider = provider_name,
+                status = %status,
+                attempt,
+                elapsed_ms = attempt_started.elapsed().as_millis(),
+                "Provider response"
+            );
+            return Ok(resp);
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("{provider_name} request failed after retries")))
+    }
+
     fn compute_backoff(&self, attempt: u32, retry_after_ms: Option<u64>) -> u64 {
         if let Some(ra) = retry_after_ms {
             return ra.min(self.retry_config.max_delay_ms);
@@ -726,6 +874,26 @@ impl HttpClient {
         let jitter = simple_jitter(delay / 4 + 1);
         (delay + jitter).min(self.retry_config.max_delay_ms)
     }
+}
+
+pub fn extract_model_ids(body: &Value) -> Vec<String> {
+    let mut model_ids = body
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map(std::string::ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    model_ids.sort();
+    model_ids.dedup();
+    model_ids
 }
 
 fn simple_jitter(max: u64) -> u64 {

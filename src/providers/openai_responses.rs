@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use super::{
-    apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
+    apply_sampling_mode, build_openai_content_parts, extract_model_ids, initial_sampling_mode,
     is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
     ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
     StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
@@ -307,6 +307,22 @@ impl Provider for OpenAiResponsesProvider {
             HashMap::<String, String>::new(),
             |block, state| parse_responses_sse(block, state).into_iter().collect(),
         ))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let url = format!("{}/models", self.http.base_url);
+        let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
+        tracing::info!(
+            "OpenAI Responses list models: base_url={}",
+            self.http.base_url
+        );
+        let body = self
+            .http
+            .send_get_request(&url, &headers, "OpenAI Responses listmodel")
+            .await?;
+        let models = extract_model_ids(&body);
+        tracing::info!("OpenAI Responses list models done: count={}", models.len());
+        Ok(models)
     }
 }
 

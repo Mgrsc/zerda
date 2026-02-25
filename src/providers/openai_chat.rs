@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::{
-    apply_sampling_mode, build_openai_content_parts, initial_sampling_mode,
+    apply_sampling_mode, build_openai_content_parts, extract_model_ids, initial_sampling_mode,
     is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
     ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
     StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
@@ -334,6 +334,19 @@ impl Provider for OpenAiChatProvider {
             HashMap::<usize, PendingToolCall>::new(),
             parse_openai_chat_sse,
         ))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let url = format!("{}/models", self.http.base_url);
+        let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
+        tracing::info!("OpenAI Chat list models: base_url={}", self.http.base_url);
+        let body = self
+            .http
+            .send_get_request(&url, &headers, "OpenAI Chat listmodel")
+            .await?;
+        let models = extract_model_ids(&body);
+        tracing::info!("OpenAI Chat list models done: count={}", models.len());
+        Ok(models)
     }
 }
 
