@@ -66,6 +66,10 @@ fn parse_command(input: &str) -> Option<(&str, &str)> {
     Some((command_name, args))
 }
 
+pub fn is_command(input: &str) -> bool {
+    parse_command(input).is_some()
+}
+
 pub fn is_cancel_command(input: &str) -> bool {
     parse_command(input)
         .map(|(name, _)| name == "cancel")

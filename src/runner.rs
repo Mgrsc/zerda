@@ -663,12 +663,16 @@ pub async fn run_serve(
                 continue;
             }
             if next.session_id == session_id && next.channel == channel_name {
-                content.push('\n');
-                content.push_str(&next.content);
-                if let Some(mut extra) = next.content_parts {
-                    content_parts
-                        .get_or_insert_with(Vec::new)
-                        .append(&mut extra);
+                if commands::is_command(&next.content) {
+                    pending.push(next);
+                } else {
+                    content.push('\n');
+                    content.push_str(&next.content);
+                    if let Some(mut extra) = next.content_parts {
+                        content_parts
+                            .get_or_insert_with(Vec::new)
+                            .append(&mut extra);
+                    }
                 }
             } else {
                 pending.push(next);
@@ -730,8 +734,10 @@ pub async fn run_serve(
                         tracing::warn!("Failed to send command feedback: {e}");
                     }
                 }
-                if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
-                    tracing::warn!("Failed to save session {storage_id}: {e}");
+                if !session_agent.history.is_empty() {
+                    if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
+                        tracing::warn!("Failed to save session {storage_id}: {e}");
+                    }
                 }
                 tracing::info!(
                     parent: &turn_span,
