@@ -425,6 +425,67 @@ fn validate_config(config: &Config) -> Result<()> {
         }
     }
 
+    validate_mcp_servers(&config.mcp)?;
+
+    Ok(())
+}
+
+fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<()> {
+    for server in servers {
+        anyhow::ensure!(!server.name.trim().is_empty(), "mcp.name must not be empty");
+        anyhow::ensure!(
+            !server.transport.trim().is_empty(),
+            "mcp.{}.transport must not be empty",
+            server.name
+        );
+
+        match server.transport.as_str() {
+            "stdio" => {
+                anyhow::ensure!(
+                    server
+                        .command
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                    "mcp.{} with stdio transport requires non-empty command",
+                    server.name
+                );
+                anyhow::ensure!(
+                    server.url.is_none() || server.url.as_deref().is_some_and(|u| u.is_empty()),
+                    "mcp.{} with stdio transport must not set url",
+                    server.name
+                );
+            }
+            "streamable-http" => {
+                anyhow::ensure!(
+                    server.url.as_deref().is_some_and(|s| !s.trim().is_empty()),
+                    "mcp.{} with streamable-http transport requires non-empty url",
+                    server.name
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "mcp.{} transport '{}' is unsupported; expected 'stdio' or 'streamable-http'",
+                    server.name,
+                    other
+                );
+            }
+        }
+
+        for arg in &server.args {
+            anyhow::ensure!(
+                !arg.is_empty(),
+                "mcp.{} args must not contain empty items",
+                server.name
+            );
+        }
+        for key in server.env.keys() {
+            anyhow::ensure!(
+                !key.trim().is_empty(),
+                "mcp.{} env keys must not be empty",
+                server.name
+            );
+        }
+    }
     Ok(())
 }
 

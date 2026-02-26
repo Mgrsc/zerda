@@ -1,8 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::util::fs::atomic_write_text;
-
 pub struct Memory {
     base_dir: PathBuf,
 }
@@ -21,34 +19,6 @@ impl Memory {
                 tracing::warn!("Failed to read {}: {e}", path.display());
                 None
             }
-        }
-    }
-
-    pub fn load_long_term_memory(&self, max_chars: usize) -> Option<String> {
-        let path = self.base_dir.join("MEMORY.md");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(e) => {
-                tracing::warn!("Failed to read {}: {e}", path.display());
-                return None;
-            }
-        };
-        if content.is_empty() {
-            return None;
-        }
-        if content.len() > max_chars {
-            let start = content.len() - max_chars;
-            let mut start = start;
-            while start < content.len() && !content.is_char_boundary(start) {
-                start += 1;
-            }
-            if let Some(nl) = content[start..].find('\n') {
-                start += nl + 1;
-            }
-            Some(content[start..].to_string())
-        } else {
-            Some(content)
         }
     }
 
@@ -75,28 +45,5 @@ impl Memory {
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.base_dir)?;
         Ok(())
-    }
-
-    pub fn memory_path(&self) -> PathBuf {
-        self.base_dir.join("MEMORY.md")
-    }
-
-    pub fn append_memory(&self, content: &str) -> Result<()> {
-        let path = self.memory_path();
-        let existing = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e.into()),
-        };
-        let mut next = existing;
-        next.push('\n');
-        next.push_str(content);
-        next.push('\n');
-        atomic_write_text(&path, &next)?;
-        Ok(())
-    }
-
-    pub fn read_memory(&self, max_chars: usize) -> Option<String> {
-        self.load_long_term_memory(max_chars)
     }
 }

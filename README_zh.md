@@ -190,11 +190,40 @@ args = ["-y", "@scope/server"]
 
 ### KV-Cache 友好架构
 
-Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。内置工具定义列表（`shell → read → write → reload → memory → skill → todo → …`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
+Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。在 Planner 主循环中，内置工具定义列表（`reload → skill → todo → tts → delegate_to_executor`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
+
+### Planner-Executor 解耦架构
+
+Zerda 已从单体 ReAct 循环迁移为双智能体架构。Planner 负责意图理解、任务降维拆解与最终综合；Executor 负责环境交互与机械执行。通过策略层与执行层的物理隔离，主链路上下文中低层工具噪声显著减少，长对话下高维推理稳定性更好。
+
+该分层同时改善了并发扩展特性。工程上，Planner 可以扇出多个相互独立的执行节点，同时保持单一且清洁的高层推理线程。配合可横向扩展的 Executor worker，任务扇出速度可显著高于单体 ReAct 回路，而不会同比例污染主脑上下文。
+
+### 程序化工具调用（PTC）
+
+Executor 采用程序化工具调用（PTC）进行计算下推。`execute_python_script` 以结构化字段接收纯 Python 代码，自动完成脚本落盘、执行、日志与结果输出，并返回标准化状态。这样可把原本多步工具链压缩为单个受控执行块，减少主循环中的工具调用冗余。
+
+### 抗上下文腐败（Context Rot）
+
+该架构针对 Context Rot 做了显式设计：异常栈、重试细节、机械噪声主要沉淀在 Executor 工件与日志中，Planner 仅接收决策级结果。在线索已充分时（包括 `links=[]` 这类负信息证据）可直接收敛；在线索不足时，再由 Planner 重置局部策略并分配新任务节点，避免在复杂任务中过早收敛。
+
+### Token 效率观测
+
+在 `example-docs/some-file/` 的网站调查样本对比中，Planner-Executor + PTC 相比旧的直接工具路径表现出显著降耗。
+
+| 指标 | 传统 ReAct（单回路） | Planner-Executor + PTC |
+| :--- | :--- | :--- |
+| 主上下文中的工具轨迹暴露 | 高 | 低 |
+| 主上下文中的机械报错噪声 | 高 | 主要隔离在 Executor 工件 |
+| 典型工具链长度 | 更长、更碎 | 压缩为受控执行块 |
+| Token 消耗（首轮样本） | 基线 | 样本观测约下降 80% |
+| 多轮稳定性 | 轨迹累积后更快劣化 | 策略/执行分离后更稳定 |
+
+以上表格属于初始第一轮测试与样本观测结果，不是通用基准。实际收益会随任务形态、工具扇出和输出长度而变化。
+在持续多轮工具调用场景下，传统 ReAct 往往因推理、执行、重试和诊断信息共线累积而更快膨胀上下文；Planner-Executor 将大部分执行残留沉淀在 Executor 工件/日志中，因此 Planner 上下文增速通常更慢、稳定性更高。
 
 ### 文件系统上下文
 
-大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。模型按需通过 `shell` / `read` 工具重新读取完整内容（按需读取，Read-on-Demand），避免预载造成的上下文膨胀。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
+大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。Executor 工件采用分层目录持久化：`~/.zerda/executor_jobs/<YYYYMMDD>/<HHMMSS>_<task_slug>/`，脚本/日志/结果/元数据分离，便于复盘且降低主链路上下文污染。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
 
 ### ToDo Recitation（待办事项背诵）
 
