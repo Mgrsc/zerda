@@ -645,8 +645,8 @@ impl HttpClient {
     ) -> Result<reqwest::Response> {
         let mut last_error: Option<anyhow::Error> = None;
 
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!(
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
                 provider = provider_name,
                 url = %url,
                 payload = %summarize_json(body),
@@ -742,7 +742,7 @@ impl HttpClient {
                 continue;
             }
 
-            tracing::debug!(
+            tracing::trace!(
                 provider = provider_name,
                 status = %status,
                 attempt,
@@ -764,7 +764,7 @@ impl HttpClient {
     ) -> Result<reqwest::Response> {
         let mut last_error: Option<anyhow::Error> = None;
 
-        tracing::debug!(provider = provider_name, url = %url, "Provider GET request");
+        tracing::trace!(provider = provider_name, url = %url, "Provider GET request");
 
         for attempt in 0..=self.retry_config.max_retries {
             let attempt_started = Instant::now();
@@ -851,7 +851,7 @@ impl HttpClient {
                 continue;
             }
 
-            tracing::debug!(
+            tracing::trace!(
                 provider = provider_name,
                 status = %status,
                 attempt,

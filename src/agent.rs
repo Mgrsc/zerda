@@ -9,7 +9,7 @@ use futures::StreamExt as _;
 use uuid::Uuid;
 
 use crate::config::AgentConfig;
-use crate::logging::{summarize_json, summarize_text};
+use crate::logging::{summarize_json, summarize_text, text_fingerprint};
 use crate::providers::{
     ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent, ThinkingBlock,
     ToolCall, ToolSpec, Usage,
@@ -819,7 +819,7 @@ async fn execute_tool(tool_map: &HashMap<&str, &dyn Tool>, call: &ToolCall) -> T
         tracing::debug!(
             tool = %call.name,
             tool_call_id = %call.id,
-            args = %summarize_json(&call.arguments),
+            args = %summarize_tool_args(&call.name, &call.arguments),
             "Tool start"
         );
     }
@@ -855,4 +855,28 @@ async fn execute_tool(tool_map: &HashMap<&str, &dyn Tool>, call: &ToolCall) -> T
             is_error: true,
         }
     }
+}
+
+fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
+    if tool_name == "shell" {
+        if let Some(command) = args.get("command").and_then(serde_json::Value::as_str) {
+            return format!(
+                "shell(command_chars={},command_fp={},command_preview={})",
+                command.chars().count(),
+                text_fingerprint(command),
+                shell_command_preview(command)
+            );
+        }
+    }
+    summarize_json(args)
+}
+
+fn shell_command_preview(command: &str) -> String {
+    const MAX_CHARS: usize = 180;
+    let total = command.chars().count();
+    let mut preview: String = command.chars().take(MAX_CHARS).collect();
+    if total > MAX_CHARS {
+        preview.push('…');
+    }
+    format!("{preview:?}")
 }

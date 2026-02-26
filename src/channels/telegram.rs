@@ -486,10 +486,13 @@ fn markdown_v2_candidates(text: &str) -> Vec<String> {
     let normalized = normalize_telegram_markdown(&table_wrapped);
     let rendered = render_markdown_v2_safe(&normalized);
     let mut candidates = Vec::new();
-    for candidate in [text.to_string(), table_wrapped, normalized, rendered] {
+    for candidate in [rendered, normalized, table_wrapped] {
         if !candidates.iter().any(|c| c == &candidate) {
             candidates.push(candidate);
         }
+    }
+    if candidates.is_empty() {
+        candidates.push(text.to_string());
     }
     candidates
 }

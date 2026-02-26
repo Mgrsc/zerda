@@ -86,15 +86,13 @@ impl OpenAiChatProvider {
                                 if let Some(extra_content) = &tc.extra_content {
                                     call["extra_content"] = extra_content.clone();
                                 }
-                                tracing::debug!(
-                                    tool_call_id = %tc.id,
-                                    tool_name = %tc.name,
-                                    has_extra_content = tc.extra_content.is_some(),
-                                    "OpenAI Chat replaying assistant tool_call"
-                                );
                                 call
                             })
                             .collect();
+                        tracing::trace!(
+                            tool_call_count = tool_calls.len(),
+                            "OpenAI Chat replaying assistant tool_calls"
+                        );
                         message["tool_calls"] = json!(tool_calls);
                     }
                     api_messages.push(message);
@@ -289,7 +287,7 @@ impl Provider for OpenAiChatProvider {
         let url = format!("{}/chat/completions", self.http.base_url);
         let headers = [("Authorization", format!("Bearer {}", self.http.api_key))];
 
-        tracing::info!(
+        tracing::trace!(
             "OpenAI Chat stream: model={}, sampling_mode={:?}, temperature={:?}, top_p={:?}",
             opts.model,
             sampling_mode,
@@ -323,7 +321,7 @@ impl Provider for OpenAiChatProvider {
                 }
             }
         };
-        tracing::info!(
+        tracing::trace!(
             "OpenAI Chat stream connected: model={}, elapsed_ms={}",
             opts.model,
             started.elapsed().as_millis()
@@ -530,7 +528,11 @@ fn parse_openai_chat_stream_chunk(
                 if !pending.started {
                     if let (Some(id), Some(name)) = (pending.id.clone(), pending.name.clone()) {
                         pending.started = true;
-                        tracing::info!("OpenAI Chat tool call start: {name}");
+                        tracing::trace!(
+                            tool = %name,
+                            tool_call_id = %id,
+                            "OpenAI Chat tool call start"
+                        );
                         events.push(Ok(StreamEvent::ToolCallStart {
                             id: id.clone(),
                             name,
@@ -550,7 +552,7 @@ fn parse_openai_chat_stream_chunk(
 
     if let Some(usage) = data.get("usage").filter(|u| !u.is_null()) {
         let u = Usage::from_json(usage, "prompt_tokens", "completion_tokens");
-        tracing::info!(
+        tracing::debug!(
             "OpenAI Chat stream done: in={}, out={}",
             u.input_tokens,
             u.output_tokens

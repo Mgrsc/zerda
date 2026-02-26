@@ -50,7 +50,7 @@ pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&s
     }
 
     let prompt = parts.join("\n\n");
-    tracing::debug!("System prompt size: {} chars", prompt.len());
+    tracing::trace!("System prompt size: {} chars", prompt.len());
     if prompt.len() > config::MAX_PROMPT_CHARS {
         tracing::warn!(
             "System prompt exceeds {} chars ({} chars)",
