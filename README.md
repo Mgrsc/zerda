@@ -202,6 +202,14 @@ The split also improves concurrency scaling characteristics. In practice, a Plan
 
 Instead of repeatedly composing shell heredoc payloads in-context, the Executor uses programmatic tool calling for compute pushdown. The `execute_python_script` tool accepts pure Python code in a structured field, writes/runs scripts in a managed artifact directory, and returns standardized execution status plus compact findings. This converts many multi-step tool chains into one bounded execution block and reduces tool-call chatter in the main loop.
 
+### Prewritten Primitive Layer (Code Primitives)
+
+On top of PTC, Zerda adds a prewritten primitive layer: frequently used, failure-prone, and reusable environment interactions are implemented as async Python functions and injected into the Executor runtime for direct `await` calls. This reduces ad-hoc script assembly and field-path guessing failures.
+
+Primitives follow a strict shared contract: `status/data/error_code/error_message/retryable`, and each primitive docstring defines an explicit `[Output Contract]` with success criteria and key field paths. For Firecrawl-oriented primitives, responses are normalized for flat access first (for example `data.markdown`, `data.html`, `data.metadata`, `data.results`) while preserving a compatible raw upstream payload field for backward compatibility.
+
+This layer decouples tool capability from task-level scripting: primitives own argument validation, timeout/retry policy, error typing, and telemetry persistence; the model focuses on orchestration and business logic. For compatibility, complex conditional constraints are enforced in runtime checks rather than pushed into top-level tool schemas.
+
 ### Context Rot Resistance
 
 The architecture explicitly mitigates Context Rot. Mechanical failures, stack traces, and retry noise are retained in Executor artifacts/logs, while the Planner receives reduced, decision-grade outputs. When evidence is sufficient (including negative evidence such as empty link sets), the Planner can converge immediately; when evidence is insufficient, the Planner can re-decompose the task with a fresh local strategy without inheriting excessive execution residue.

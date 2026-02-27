@@ -19,7 +19,11 @@ pub struct ExecutePythonScriptTool {
     script_path: PathBuf,
     log_path: PathBuf,
     out_path: PathBuf,
+    telemetry_path: PathBuf,
     timeout_secs: u64,
+    primitives_py_root: Option<PathBuf>,
+    bootstrap_path: Option<PathBuf>,
+    firecrawl_enabled: bool,
 }
 
 impl ExecutePythonScriptTool {
@@ -27,13 +31,21 @@ impl ExecutePythonScriptTool {
         script_path: PathBuf,
         log_path: PathBuf,
         out_path: PathBuf,
+        telemetry_path: PathBuf,
         timeout_secs: u64,
+        primitives_py_root: Option<PathBuf>,
+        bootstrap_path: Option<PathBuf>,
+        firecrawl_enabled: bool,
     ) -> Self {
         Self {
             script_path,
             log_path,
             out_path,
+            telemetry_path,
             timeout_secs,
+            primitives_py_root,
+            bootstrap_path,
+            firecrawl_enabled,
         }
     }
 }
@@ -107,21 +119,48 @@ impl Tool for ExecutePythonScriptTool {
         if let Some(parent) = self.out_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        if let Some(parent) = self.telemetry_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
-        tokio::fs::write(&self.script_path, code).await?;
+        let final_code = build_bootstrapped_code(
+            code,
+            self.bootstrap_path.as_ref(),
+            &self.out_path,
+            &self.log_path,
+            &self.telemetry_path,
+        );
+        tokio::fs::write(&self.script_path, final_code).await?;
         tracing::info!(
             script = %self.script_path.display(),
             timeout_secs = self.timeout_secs,
             script_bytes = code_bytes,
+            firecrawl_enabled = self.firecrawl_enabled,
             "execute_python_script start"
         );
 
-        let child = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(&self.script_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()?;
+            .env("EXECUTOR_OUT_PATH", &self.out_path)
+            .env("EXECUTOR_LOG_PATH", &self.log_path)
+            .env("EXECUTOR_TELEMETRY_PATH", &self.telemetry_path)
+            .env(
+                "EXECUTOR_ENABLE_FIRECRAWL_PRIMITIVES",
+                if self.firecrawl_enabled { "1" } else { "0" },
+            );
+
+        if let Some(root) = &self.primitives_py_root {
+            command.env("EXECUTOR_PRIMITIVES_PY_ROOT", root);
+        }
+        if let Some(parent) = self.script_path.parent() {
+            command.current_dir(parent);
+        }
+
+        let child = command.spawn()?;
 
         let (mut status, exit_code, stdout_text, stderr_text) = match tokio::time::timeout(
             Duration::from_secs(self.timeout_secs),
@@ -210,6 +249,7 @@ impl Tool for ExecutePythonScriptTool {
             "script_path": self.script_path,
             "log_path": self.log_path,
             "out_path": self.out_path,
+            "telemetry_path": self.telemetry_path,
             "out_size": out_size,
             "log_size": log_size,
             "stdout_preview": stdout_text.truncate_for_ui(MAX_OUT_PREVIEW_CHARS),
@@ -226,4 +266,47 @@ impl Tool for ExecutePythonScriptTool {
             is_error: status != "ok",
         })
     }
+}
+
+fn build_bootstrapped_code(
+    user_code: &str,
+    bootstrap_path: Option<&PathBuf>,
+    out_path: &PathBuf,
+    log_path: &PathBuf,
+    telemetry_path: &PathBuf,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("import os".to_string());
+    lines.push(format!(
+        "os.environ.setdefault(\"EXECUTOR_OUT_PATH\", {})",
+        to_py_string(out_path.display().to_string())
+    ));
+    lines.push(format!(
+        "os.environ.setdefault(\"EXECUTOR_LOG_PATH\", {})",
+        to_py_string(log_path.display().to_string())
+    ));
+    lines.push(format!(
+        "os.environ.setdefault(\"EXECUTOR_TELEMETRY_PATH\", {})",
+        to_py_string(telemetry_path.display().to_string())
+    ));
+    if let Some(path) = bootstrap_path {
+        lines.push(format!(
+            "_BOOTSTRAP_PATH = {}",
+            to_py_string(path.display().to_string())
+        ));
+        lines.push("if os.path.exists(_BOOTSTRAP_PATH):".to_string());
+        lines.push("    with open(_BOOTSTRAP_PATH, \"r\", encoding=\"utf-8\") as _bf:".to_string());
+        lines.push("        _bootstrap_src = _bf.read()".to_string());
+        lines.push(
+            "    exec(compile(_bootstrap_src, _BOOTSTRAP_PATH, \"exec\"), globals(), globals())"
+                .to_string(),
+        );
+    }
+    lines.push(String::new());
+    lines.push(user_code.to_string());
+    lines.join("\n")
+}
+
+fn to_py_string(value: String) -> String {
+    serde_json::to_string(&value).unwrap_or_else(|_| "\"\"".to_string())
 }

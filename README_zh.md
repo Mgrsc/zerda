@@ -202,6 +202,14 @@ Zerda 已从单体 ReAct 循环迁移为双智能体架构。Planner 负责意�
 
 Executor 采用程序化工具调用（PTC）进行计算下推。`execute_python_script` 以结构化字段接收纯 Python 代码，自动完成脚本落盘、执行、日志与结果输出，并返回标准化状态。这样可把原本多步工具链压缩为单个受控执行块，减少主循环中的工具调用冗余。
 
+### 预写原语层（Code Primitives）
+
+在 PTC 之上，Zerda 增加了“预写原语”机制：将高频、易错、可复用的环境交互预先实现为 Python 异步函数，并在 Executor 运行时注入给模型直接 `await` 调用。该层用于降低临时脚本拼装成本与字段路径猜测错误。
+
+当前原语遵循统一契约：固定返回 `status/data/error_code/error_message/retryable`，并在 docstring 中显式声明 `[Output Contract]` 的成功判定和关键字段路径。对于 Firecrawl 类原语，返回结构采用扁平化优先（例如 `data.markdown`、`data.html`、`data.metadata`、`data.results` 可直接访问），同时保留上游原始 payload 兼容字段，兼顾稳定读取与向后兼容。
+
+这一层本质上把“工具能力”与“任务级代码”解耦：原语负责参数校验、超时重试、错误分类和遥测落盘；模型只需组合调用顺序与业务逻辑。对应地，复杂条件约束尽量在运行时代码中校验，避免把不兼容的复杂 schema 直接压给模型侧工具定义。
+
 ### 抗上下文腐败（Context Rot）
 
 该架构针对 Context Rot 做了显式设计：异常栈、重试细节、机械噪声主要沉淀在 Executor 工件与日志中，Planner 仅接收决策级结果。在线索已充分时（包括 `links=[]` 这类负信息证据）可直接收敛；在线索不足时，再由 Planner 重置局部策略并分配新任务节点，避免在复杂任务中过早收敛。
