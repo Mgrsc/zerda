@@ -14,6 +14,7 @@ use crate::tts::TtsProvider;
 pub mod execute_python_script;
 pub mod reload;
 pub mod schema_compat;
+pub mod search_docs;
 pub mod shell;
 pub mod skill;
 pub mod subagent;
@@ -127,6 +128,9 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
             chat_opts,
             tool_timeout,
         )));
+    }
+    if let Some(tool) = search_docs::SearchDocsTool::try_from_env() {
+        tools.push(Box::new(tool));
     }
     (tools, todo_handle)
 }

@@ -181,6 +181,26 @@ command = "npx"
 args = ["-y", "@scope/server"]
 ```
 
+### 🔍 文档搜索
+
+Zerda 通过 `search_zerda_documents` 工具支持对自身项目文档的语义搜索，使 Agent 能够按需查阅配置指南、命令参考和架构说明。
+
+**当前支持的后端：[Cloudflare AutoRAG (AI Search)](https://developers.cloudflare.com/autorag/)**
+
+配置步骤：
+
+1. 将 `docs/zerda/` 目录下的文档文件上传到 Cloudflare R2 存储桶。
+2. 在 Cloudflare 控制台创建一个 AutoRAG 实例并关联该 R2 存储桶。
+3. 创建 Cloudflare API Token，权限选择 **Account → AI Search Index Engine → Run**。
+4. 设置以下环境变量：
+   ```env
+   CF_AI_SEARCH_ACCOUNT_ID=<你的账户ID>
+   CF_AI_SEARCH_API_TOKEN=<你的API Token>
+   CF_AI_SEARCH_INSTANCE_NAME=<你的AutoRAG实例名>
+   ```
+
+三个变量全部设置后，`search_zerda_documents` 工具会自动注册。缺少任一变量时，该工具将被静默跳过，不会报错。
+
 ---
 
 ## 🧬 技术设计

@@ -181,6 +181,26 @@ command = "npx"
 args = ["-y", "@scope/server"]
 ```
 
+### 🔍 Document Search
+
+Zerda supports semantic search over its own project documentation via the `search_zerda_documents` tool, enabling the Agent to look up configuration guides, command references, and architectural details on demand.
+
+**Currently supported backend: [Cloudflare AutoRAG (AI Search)](https://developers.cloudflare.com/autorag/)**
+
+Setup:
+
+1. Upload the documentation files from `docs/zerda/` to a Cloudflare R2 bucket.
+2. Create an AutoRAG instance in the Cloudflare dashboard linked to that R2 bucket.
+3. Create a Cloudflare API Token with **Account → AI Search Index Engine → Run** permission.
+4. Set the following environment variables:
+   ```env
+   CF_AI_SEARCH_ACCOUNT_ID=<your-account-id>
+   CF_AI_SEARCH_API_TOKEN=<your-api-token>
+   CF_AI_SEARCH_INSTANCE_NAME=<your-autorag-instance-name>
+   ```
+
+When all three variables are present, the `search_zerda_documents` tool is automatically registered. If any variable is missing, the tool is silently skipped.
+
 ---
 
 ## 🧬 Technical Design
