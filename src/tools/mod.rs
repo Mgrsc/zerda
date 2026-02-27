@@ -11,7 +11,9 @@ use crate::providers::ToolSpec;
 use crate::skills::Skill;
 use crate::tts::TtsProvider;
 
-pub mod execute_python_script;
+pub mod mcp;
+pub mod memory_tool;
+pub mod read;
 pub mod reload;
 pub mod schema_compat;
 pub mod shell;
@@ -19,6 +21,7 @@ pub mod skill;
 pub mod subagent;
 pub mod todo;
 pub mod tts;
+pub mod write;
 
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -102,8 +105,8 @@ impl From<(BuiltinToolsRuntime, BuiltinToolsDependencies)> for BuiltinToolsConte
 pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::TodoHandle) {
     let BuiltinToolsContext {
         tool_timeout,
-        memory: _memory,
-        max_memory_chars: _max_memory_chars,
+        memory,
+        max_memory_chars,
         config_path,
         reload_signal,
         tts_provider,
@@ -114,7 +117,11 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
 
     let (todo_tool, todo_handle) = todo::TodoTool::new();
     let mut tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(shell::ShellTool::new(tool_timeout)),
+        Box::new(read::ReadTool),
+        Box::new(write::WriteTool),
         Box::new(reload::ReloadTool::new(config_path, reload_signal)),
+        Box::new(memory_tool::MemoryTool::new(memory, max_memory_chars)),
         Box::new(skill::SkillTool::new(skills, skill_cache)),
         Box::new(todo_tool),
     ];

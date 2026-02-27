@@ -190,40 +190,11 @@ args = ["-y", "@scope/server"]
 
 ### KV-Cache Friendly Architecture
 
-Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, user context) is injected only at the tail of the user message, never into the system prompt. In the Planner loop, the built-in tool definition list (`reload → skill → todo → tts → delegate_to_executor`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
-
-### Planner-Executor Decoupling
-
-Zerda has migrated from a monolithic ReAct loop to a dual-agent Planner-Executor architecture. The Planner focuses on intent understanding, task decomposition, and final synthesis, while the Executor focuses on environment interaction and mechanical execution. This hard separation significantly reduces direct low-level tool traces in the Planner's context and keeps high-level reasoning cleaner over long multi-turn sessions.
-
-The split also improves concurrency scaling characteristics. In practice, a Planner can fan out multiple independent execution nodes while keeping one clean reasoning thread. With horizontally scalable Executor workers, task fan-out can grow much faster than in a single mixed ReAct loop, without proportionally polluting the Planner context.
-
-### Programmatic Tool Calling (PTC)
-
-Instead of repeatedly composing shell heredoc payloads in-context, the Executor uses programmatic tool calling for compute pushdown. The `execute_python_script` tool accepts pure Python code in a structured field, writes/runs scripts in a managed artifact directory, and returns standardized execution status plus compact findings. This converts many multi-step tool chains into one bounded execution block and reduces tool-call chatter in the main loop.
-
-### Context Rot Resistance
-
-The architecture explicitly mitigates Context Rot. Mechanical failures, stack traces, and retry noise are retained in Executor artifacts/logs, while the Planner receives reduced, decision-grade outputs. When evidence is sufficient (including negative evidence such as empty link sets), the Planner can converge immediately; when evidence is insufficient, the Planner can re-decompose the task with a fresh local strategy without inheriting excessive execution residue.
-
-### Empirical Token Efficiency
-
-In the website-investigation samples under `example-docs/some-file/`, the Planner-Executor + PTC workflow showed substantial token reduction versus the prior direct-tooling path.
-
-| Metric | Traditional ReAct (single loop) | Planner-Executor + PTC |
-| :--- | :--- | :--- |
-| Tool trace exposure in main context | High | Low |
-| Mechanical error noise in main context | High | Mostly isolated to Executor artifacts |
-| Typical tool-call chain length | Longer, chatty | Compressed into bounded execution blocks |
-| Token usage (round-1 sample) | Baseline | ~80% lower in observed sample |
-| Multi-turn stability | Degrades faster as traces accumulate | More stable due to strategy/execution separation |
-
-This table reflects an initial first-round test and sample observation, not a universal benchmark. Actual gains vary by task shape, tool fan-out, and output verbosity.
-For sustained multi-round tool usage, traditional ReAct often experiences faster context expansion because reasoning, execution traces, retries, and diagnostics co-reside in one thread; Planner-Executor keeps most execution residue in Executor artifacts/logs, so Planner context tends to grow slower and remain more stable.
+Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, user context) is injected only at the tail of the user message, never into the system prompt. The built-in tool definition list (`shell → read → write → reload → memory → skill → todo → …`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
 
 ### File System Context
 
-Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. Executor artifacts are persisted under `~/.zerda/executor_jobs/<YYYYMMDD>/<HHMMSS>_<task_slug>/` with separated script/log/result/meta files, which makes replay and postmortem analysis deterministic while minimizing Planner context pollution. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
+Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. The model re-accesses the full content on demand via `shell` / `read` tools (read-on-demand), avoiding upfront context bloat. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
 
 ### ToDo Recitation
 

@@ -173,9 +173,12 @@ async fn main() -> Result<()> {
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
     };
-    let (all_tools, todo_handle) = tools::builtin_tools((tools_runtime, tools_dependencies).into());
+    let (mut all_tools, todo_handle) =
+        tools::builtin_tools((tools_runtime, tools_dependencies).into());
 
     let builtin_count = all_tools.len();
+    let mcp_tools = tools::mcp::connect_mcp_servers(&cfg.mcp).await;
+    all_tools.extend(mcp_tools);
 
     let identity_path = config::resolve_path(&cfg.agent.identity_path);
     let identity_text = if identity_path.exists() {
