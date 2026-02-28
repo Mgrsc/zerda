@@ -218,6 +218,12 @@ Zerda has migrated from a monolithic ReAct loop to a dual-agent Planner-Executor
 
 The split also improves concurrency scaling characteristics. In practice, a Planner can fan out multiple independent execution nodes while keeping one clean reasoning thread. With horizontally scalable Executor workers, task fan-out can grow much faster than in a single mixed ReAct loop, without proportionally polluting the Planner context.
 
+### Compiler Pattern (Intent Compilation)
+
+Between Planner and Executor, Zerda applies a Compiler Pattern: the Planner acts as a front-end compiler that translates verbose, ambiguous user requests and environmental context into high-density structured instructions before passing them to the Executor. Instructions follow the form `ACTION(params) -> {return_fields}` — a compact, machine-readable format that eliminates narrative overhead and makes the Executor's job unambiguous.
+
+This mirrors how a compiler transforms human-readable source code into optimized intermediate representation: the Planner absorbs context, resolves ambiguity, and emits a minimal instruction that the weaker Executor model can follow reliably. The result is fewer wasted tokens on verbose delegation briefs, lower error rates from the Executor misinterpreting intent, and a clean separation between "understanding what to do" (Planner) and "doing it" (Executor).
+
 ### Programmatic Tool Calling (PTC)
 
 Instead of repeatedly composing shell heredoc payloads in-context, the Executor uses programmatic tool calling for compute pushdown. The `execute_python_script` tool accepts pure Python code in a structured field, writes/runs scripts in a managed artifact directory, and returns standardized execution status plus compact findings. This converts many multi-step tool chains into one bounded execution block and reduces tool-call chatter in the main loop.
@@ -256,6 +262,8 @@ Large files (>10 MB) are never loaded in full; the tool returns a head/tail prev
 ### ToDo Recitation
 
 In long sessions, models are susceptible to the "Lost in the Middle" effect and attention-basin bias, causing attention to drop for instructions positioned in the middle of the context. To counteract this, `TodoTool` maintains a session-scoped task list. Each time a user turn is assembled, `pending_reminder()` automatically injects the outstanding items near the end of the user message. This continuously pushes global objectives into the model's recency attention window, enforcing periodic review and resisting attention collapse.
+
+Beyond attention anchoring, `TodoTool` doubles as the task orchestration backbone for complex requests. The Planner decomposes multi-step work via `todo(add)`, delegates each sub-task with a compiled instruction, and marks `todo(done)` upon completion — forming an auditable execution trace. `TodoTool` is concurrent-safe (internally `Mutex`-protected), allowing batch creation in a single iteration; a typical 4-subtask workflow completes in ~6 iterations.
 
 ### Keep the Errors
 

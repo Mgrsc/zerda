@@ -92,7 +92,7 @@ impl Tool for TodoTool {
     }
 
     fn is_safe_for_concurrent(&self) -> bool {
-        false
+        true
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {

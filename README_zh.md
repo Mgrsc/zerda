@@ -218,6 +218,12 @@ Zerda 已从单体 ReAct 循环迁移为双智能体架构。Planner 负责意�
 
 该分层同时改善了并发扩展特性。工程上，Planner 可以扇出多个相互独立的执行节点，同时保持单一且清洁的高层推理线程。配合可横向扩展的 Executor worker，任务扇出速度可显著高于单体 ReAct 回路，而不会同比例污染主脑上下文。
 
+### 编译器模式（Compiler Pattern）
+
+在 Planner 与 Executor 之间，Zerda 引入了编译器模式（Compiler Pattern）：Planner 充当前端编译器，将用户冗杂的自然语言请求和环境反馈"编译"为高密度结构化指令后再传递给 Executor。指令采用 `ACTION(params) -> {return_fields}` 格式——紧凑、机器可读，消除叙述性开销，使 Executor 的执行目标无歧义化。
+
+这与编译器将人类可读源码转换为优化中间表示（IR）的过程同构：Planner 吸收上下文、消解歧义，输出一条最小化指令；能力较弱的 Executor 模型只需忠实执行即可。效果是：委托阶段的 token 浪费大幅降低，Executor 误读意图的错误率下降，"理解做什么"（Planner）与"执行怎么做"（Executor）的职责分离更加彻底。
+
 ### 程序化工具调用（PTC）
 
 Executor 采用程序化工具调用（PTC）进行计算下推。`execute_python_script` 以结构化字段接收纯 Python 代码，自动完成脚本落盘、执行、日志与结果输出，并返回标准化状态。这样可把原本多步工具链压缩为单个受控执行块，减少主循环中的工具调用冗余。
@@ -255,7 +261,9 @@ Executor 采用程序化工具调用（PTC）进行计算下推。`execute_pytho
 
 ### ToDo Recitation（待办事项背诵）
 
-长会话中，模型易受“迷失在中间（Lost in the Middle）”效应和注意力盆地（Attention Basin）偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个会话级（Session-Scoped）待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入用户消息（User Message）靠近末端的位置。这一机制持续将全局目标推入模型的近因偏好（Recency Bias）注意力窗口，强制周期性复习，有效对抗注意力坍缩。
+长会话中，模型易受”迷失在中间（Lost in the Middle）”效应和注意力盆地（Attention Basin）偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个会话级（Session-Scoped）待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入用户消息（User Message）靠近末端的位置。这一机制持续将全局目标推入模型的近因偏好（Recency Bias）注意力窗口，强制周期性复习，有效对抗注意力坍缩。
+
+除了注意力锚定，`TodoTool` 同时承担复杂任务的编排职责。面对多步请求时，Planner 先通过 `todo(add)` 分解子任务，再逐个以编译后指令 delegate 给 Executor，每完成一个即 `todo(done)` 标记，形成可审计的执行轨迹。`TodoTool` 内部 `Mutex` 保护，支持单次迭代批量创建，典型 4 子任务工作流约 6 次迭代完成。
 
 ### Keep the Errors（保留错误现场）
 

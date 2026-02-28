@@ -76,41 +76,33 @@ impl Tool for SubAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate mechanical execution to the executor. Use a compact structured brief and let the executor \
-         generate and run an async Python script under ./.zerda/executor_jobs/. \
-         Return only key results and artifact paths. \
-         Prefer goal-oriented delegation and avoid binding implementation details unless user-required."
+        "Delegate execution to the executor via structured instruction: ACTION(params) -> {return_fields}. \
+         The executor generates and runs scripts under ~/.zerda/executor_jobs/. \
+         Returns key results and artifact paths."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "brief": {
+                "instruction": {
                     "type": "string",
-                    "description": "Goal-oriented delegation brief. Required fields: GOAL, INPUT, CONSTRAINTS, DONE_WHEN, RETURN. \
-                                    CONSTRAINTS must describe WHAT to achieve, never HOW. \
-                                    Bad: 'Use requests to fetch HTML, parse with BeautifulSoup'. \
-                                    Good: 'Extract main article text; ignore navigation and ads'."
-                },
-                "task_name": {
-                    "type": "string",
-                    "description": "Optional short name used in executor artifact file names"
+                    "description": "Structured instruction: ACTION(params) -> {return_fields}. Example: FETCH_WEATHER(loc=\"Beijing\") -> {temp_c, condition}"
                 }
             },
-            "required": ["brief"]
+            "required": ["instruction"]
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let brief = args
-            .get("brief")
+        let instruction = args
+            .get("instruction")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: brief"))?;
-        let task_name = args.get("task_name").and_then(|v| v.as_str()).unwrap_or("");
-        let artifact = prepare_executor_artifacts(task_name, brief)?;
-        let primitives = load_primitives_runtime(&artifact, brief)?;
-        let user_message = build_executor_user_message(brief, &artifact);
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: instruction"))?;
+        let action_name = extract_action_name(instruction);
+        let artifact = prepare_executor_artifacts(&action_name, instruction)?;
+        let primitives = load_primitives_runtime(&artifact, instruction)?;
+        let user_message = build_executor_user_message(instruction, &artifact);
         let system_prompt = build_executor_system_prompt(&primitives);
 
         let inner_tools: Vec<Box<dyn Tool>> = vec![
@@ -223,17 +215,17 @@ struct ExecutorArtifacts {
     catalog_path: PathBuf,
 }
 
-fn prepare_executor_artifacts(task_name: &str, brief: &str) -> Result<ExecutorArtifacts> {
+fn prepare_executor_artifacts(action_name: &str, instruction: &str) -> Result<ExecutorArtifacts> {
     let root = crate::config::resolve_path(EXECUTOR_DIR);
     std::fs::create_dir_all(&root)?;
 
     let now = Local::now();
     let day = now.format("%Y%m%d").to_string();
     let time = now.format("%H%M%S").to_string();
-    let basis = if task_name.trim().is_empty() {
-        brief
+    let basis = if action_name.trim().is_empty() {
+        instruction
     } else {
-        task_name
+        action_name
     };
     let slug = sanitize_slug(basis);
     let task_dir = root.join(day).join(format!("{time}_{slug}"));
@@ -247,14 +239,14 @@ fn prepare_executor_artifacts(task_name: &str, brief: &str) -> Result<ExecutorAr
     let catalog_path = task_dir.join(PRIMITIVES_CATALOG_FILE);
 
     let meta = format!(
-        "created_at: {}\nscript: {}\nlog: {}\nout: {}\ntelemetry: {}\nprimitives_catalog: {}\nbrief:\n{}\n",
+        "created_at: {}\nscript: {}\nlog: {}\nout: {}\ntelemetry: {}\nprimitives_catalog: {}\ninstruction:\n{}\n",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
         script_path.display(),
         log_path.display(),
         out_path.display(),
         telemetry_path.display(),
         catalog_path.display(),
-        brief
+        instruction
     );
     std::fs::write(&meta_path, meta)?;
 
@@ -268,9 +260,9 @@ fn prepare_executor_artifacts(task_name: &str, brief: &str) -> Result<ExecutorAr
     })
 }
 
-fn build_executor_user_message(brief: &str, a: &ExecutorArtifacts) -> String {
+fn build_executor_user_message(instruction: &str, a: &ExecutorArtifacts) -> String {
     EXECUTOR_DELEGATE_TEMPLATE
-        .replace("{{BRIEF}}", brief)
+        .replace("{{INSTRUCTION}}", instruction)
         .replace("{{SCRIPT_PATH}}", &a.script_path.display().to_string())
         .replace("{{LOG_PATH}}", &a.log_path.display().to_string())
         .replace("{{OUT_PATH}}", &a.out_path.display().to_string())
@@ -320,6 +312,17 @@ fn build_executor_result(summary: &str, a: &ExecutorArtifacts, failed: bool) -> 
     )
 }
 
+fn extract_action_name(instruction: &str) -> String {
+    let trimmed = instruction.trim();
+    if let Some(paren_idx) = trimmed.find('(') {
+        let action = trimmed[..paren_idx].trim();
+        if !action.is_empty() && action.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return action.to_lowercase();
+        }
+    }
+    String::new()
+}
+
 fn sanitize_slug(raw: &str) -> String {
     let mut out = String::new();
     let mut prev_underscore = false;
@@ -344,7 +347,7 @@ fn sanitize_slug(raw: &str) -> String {
     }
 }
 
-fn load_primitives_runtime(artifact: &ExecutorArtifacts, brief: &str) -> Result<PrimitiveRuntime> {
+fn load_primitives_runtime(artifact: &ExecutorArtifacts, instruction: &str) -> Result<PrimitiveRuntime> {
     let primitives_py_root = resolve_primitives_root()?;
     let primitives_dir = primitives_py_root.join("primitives");
     let bootstrap_path = primitives_py_root.join("bootstrap.py");
@@ -359,7 +362,7 @@ fn load_primitives_runtime(artifact: &ExecutorArtifacts, brief: &str) -> Result<
         (msg.clone(), msg)
     } else {
         let functions = discover_primitive_functions(&primitives_dir, has_firecrawl_key)?;
-        let selected = select_primitives_for_brief(&functions, brief);
+        let selected = select_primitives_for_instruction(&functions, instruction);
         if functions.is_empty() && has_firecrawl_key {
             let msg = "### Available Code Primitives\n- unavailable: no primitive functions discovered".to_string();
             (msg.clone(), msg)
@@ -619,15 +622,15 @@ fn resolve_primitives_root() -> Result<PathBuf> {
     Ok(PathBuf::from(DEFAULT_SYSTEM_PRIMITIVES_ROOT))
 }
 
-fn select_primitives_for_brief(
+fn select_primitives_for_instruction(
     functions: &[PrimitiveFunction],
-    brief: &str,
+    instruction: &str,
 ) -> Vec<PrimitiveFunction> {
     if functions.len() <= MAX_PRIMITIVES_IN_PROMPT {
         return functions.to_vec();
     }
 
-    let lower = brief.to_lowercase();
+    let lower = instruction.to_lowercase();
     let has_url_intent = lower.contains("http")
         || lower.contains("url")
         || lower.contains("网页")
