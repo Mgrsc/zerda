@@ -36,6 +36,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /root/.zerda
 ENV ZERDA_PRIMITIVES_ROOT=/usr/local/share/zerda/code_primitives/python
+ENV PYTHONPATH=/usr/local/share/zerda/code_primitives/python
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["serve"]

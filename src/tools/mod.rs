@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::memory::Memory;
 use crate::providers::ToolSpec;
+use crate::reflection::ReflectionEngine;
 use crate::skills::Skill;
 use crate::tts::TtsProvider;
 
@@ -56,6 +57,7 @@ pub struct BuiltinToolsRuntime {
     pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
+    pub disabled_primitives: Vec<String>,
 }
 
 pub struct BuiltinToolsDependencies {
@@ -64,6 +66,7 @@ pub struct BuiltinToolsDependencies {
     pub skills: Arc<RwLock<Vec<Skill>>>,
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
+    pub reflection: Option<Arc<ReflectionEngine>>,
 }
 
 pub struct BuiltinToolsContext {
@@ -72,10 +75,12 @@ pub struct BuiltinToolsContext {
     pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
+    pub disabled_primitives: Vec<String>,
     pub tts_provider: Option<Arc<dyn TtsProvider>>,
     pub skills: Arc<RwLock<Vec<Skill>>>,
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
+    pub reflection: Option<Arc<ReflectionEngine>>,
 }
 
 impl BuiltinToolsContext {
@@ -86,10 +91,12 @@ impl BuiltinToolsContext {
             max_memory_chars: runtime.max_memory_chars,
             config_path: runtime.config_path,
             reload_signal: runtime.reload_signal,
+            disabled_primitives: runtime.disabled_primitives,
             tts_provider: dependencies.tts_provider,
             skills: dependencies.skills,
             skill_cache: dependencies.skill_cache,
             subagent_provider: dependencies.subagent_provider,
+            reflection: dependencies.reflection,
         }
     }
 }
@@ -107,10 +114,12 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
         max_memory_chars: _max_memory_chars,
         config_path,
         reload_signal,
+        disabled_primitives,
         tts_provider,
         skills,
         skill_cache,
         subagent_provider,
+        reflection,
     } = ctx;
 
     let (todo_tool, todo_handle) = todo::TodoTool::new();
@@ -127,6 +136,8 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
             provider,
             chat_opts,
             tool_timeout,
+            reflection,
+            disabled_primitives,
         )));
     }
     if let Some(tool) = search_docs::SearchDocsTool::try_from_env() {

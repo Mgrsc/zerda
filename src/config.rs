@@ -128,6 +128,14 @@ pub struct AgentConfig {
     pub session_cleanup_days: u64,
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout: u64,
+    #[serde(default)]
+    pub disabled_primitives: Vec<String>,
+    #[serde(default)]
+    pub acon_enabled: bool,
+    #[serde(default)]
+    pub acon_model: Option<ModelConfig>,
+    #[serde(default)]
+    pub acon_embedding_dim: Option<u64>,
 }
 
 const MIN_MAX_ITERATIONS: usize = 10;
@@ -423,6 +431,13 @@ fn validate_config(config: &Config) -> Result<()> {
                 .is_some_and(|s| !s.is_empty());
             anyhow::ensure!(has_token, "Telegram channel requires a non-empty 'token'");
         }
+    }
+
+    for name in &config.agent.disabled_primitives {
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "agent.disabled_primitives must not contain empty names"
+        );
     }
 
     validate_mcp_servers(&config.mcp)?;

@@ -86,7 +86,7 @@ def _operation(html: str, max_chars: int) -> PrimitiveResult:
         return PrimitiveResult(
             status=ActionStatus.UPSTREAM_ERROR,
             error_code="empty_extraction",
-            error_message="HTML 中未提取到可读正文",
+            error_message="No readable main text was extracted from HTML",
             retryable=False,
         )
     return PrimitiveResult(
@@ -103,29 +103,29 @@ def _operation(html: str, max_chars: int) -> PrimitiveResult:
 async def extract_main_text_from_html(html: str, max_chars: int = 12000) -> dict[str, Any]:
     """
     [What it does]
-    从 HTML 提取可读正文与标题。
+    Extracts readable main text and title from HTML.
 
     [Args]
-    html: 原始 HTML 字符串
-    max_chars: 返回文本最大长度 (200~200000，默认 12000)
+    html: Raw HTML string.
+    max_chars: Maximum output text length (200~200000, default 12000).
 
     [Output Contract]
     res = await extract_main_text_from_html(html_string)
-    assert res["status"] == "ok"           # 成功检查，唯一判断条件
-    res["data"]["title"]                   # 页面标题
-    res["data"]["text"]                    # 提取的正文
-    res["data"]["chars"]                   # 正文字符数 (int)
+    assert res["status"] == "ok"           # Success check, only judgment condition.
+    res["data"]["title"]                   # Page title.
+    res["data"]["text"]                    # Extracted main text.
+    res["data"]["chars"]                   # Main text character count (int).
 
     [When NOT to use]
-    内容需要 JS 渲染后才出现时不要直接用。
+    Do not use directly when content appears only after JavaScript rendering.
     """
     ctx = load_context()
     try:
         payload = str(html or "").strip()
         if not payload:
-            raise ValueError("参数 html 不能为空")
+            raise ValueError("Parameter html must not be empty")
         if len(payload) > MAX_HTML_CHARS:
-            raise ValueError(f"参数 html 超过长度限制 {MAX_HTML_CHARS}")
+            raise ValueError(f"Parameter html exceeds max length {MAX_HTML_CHARS}")
         parsed_max_chars = validate_int_range(
             max_chars, "max_chars", MIN_MAX_CHARS, MAX_MAX_CHARS
         )

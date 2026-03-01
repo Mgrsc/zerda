@@ -236,6 +236,14 @@ Primitives follow a strict shared contract: `status/data/error_code/error_messag
 
 This layer decouples tool capability from task-level scripting: primitives own argument validation, timeout/retry policy, error typing, and telemetry persistence; the model focuses on orchestration and business logic. For compatibility, complex conditional constraints are enforced in runtime checks rather than pushed into top-level tool schemas.
 
+### Executor Reflection Loop (ACON)
+
+Zerda introduces ACON (Agent Context Optimization) in the Executor path to shift memory usage from "feeding more task facts" to "feeding reusable methodology and lessons" (`How to act / What to avoid`). Before an execution run, the system embeds the delegated instruction, retrieves top-matched historical guidelines from Qdrant, and injects them into the Executor prompt as concise system reminders.
+
+During execution, Zerda records iteration outcomes (tool errors and traceback signals). After the run, a reflection worker asynchronously performs failure-driven contrast: it compares failed and successful iterations from the same trajectory, then compresses one reusable guideline in imperative form. The compression prompt explicitly enforces method-level lessons (not domain facts), short output, and generalizability to similar tasks.
+
+Distilled guidelines are written back into a vector store and become reusable priors for future similar instructions. Zerda also includes a negative-feedback guardrail: if a run still ends in failure after guideline injection, those injected guideline entries are removed to avoid reinforcing unhelpful heuristics.
+
 ### Context Rot Resistance
 
 The architecture explicitly mitigates Context Rot. Mechanical failures, stack traces, and retry noise are retained in Executor artifacts/logs, while the Planner receives reduced, decision-grade outputs. When evidence is sufficient (including negative evidence such as empty link sets), the Planner can converge immediately; when evidence is insufficient, the Planner can re-decompose the task with a fresh local strategy without inheriting excessive execution residue.

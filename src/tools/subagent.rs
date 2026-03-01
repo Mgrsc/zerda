@@ -15,6 +15,8 @@ use super::{Tool, ToolResult};
 use crate::providers::{
     ChatOptions, ContentPart, ConversationMessage, Provider, Role, ToolCall, ToolSpec,
 };
+use crate::reflection::types::{IterationOutcome, ReflectionContext};
+use crate::reflection::ReflectionEngine;
 use crate::util::text::TruncateForUi;
 
 const MAX_ITERATIONS: usize = 10;
@@ -23,13 +25,12 @@ const MAX_TOKENS: u32 = 4096;
 const EXECUTOR_DIR: &str = "~/.zerda/executor_jobs";
 const MAX_KEY_OUTPUT_CHARS: usize = 6000;
 const EXECUTOR_SYSTEM_PROMPT: &str = include_str!("../prompts/executor_system.md");
+const EXECUTOR_PRIMITIVES_PROMPT: &str = include_str!("../prompts/executor_primitives.md");
 const EXECUTOR_DELEGATE_TEMPLATE: &str = include_str!("../prompts/executor_delegate.md");
 const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
 const PRIMITIVES_ROOT: &str = "code_primitives/python";
 const PRIMITIVES_CATALOG_FILE: &str = "primitives_catalog.md";
 const TELEMETRY_FILE: &str = "telemetry.jsonl";
-const FIRECRAWL_KEY_ENV: &str = "FIRECRAWL_API_KEY";
-const FIRECRAWL_ALT_KEY_ENV: &str = "FIRECRAWL_KEY";
 const DEFAULT_SYSTEM_PRIMITIVES_ROOT: &str = "/usr/local/share/zerda/code_primitives/python";
 const MAX_PRIMITIVES_IN_PROMPT: usize = 3;
 const MAX_SIGNATURE_CHARS: usize = 180;
@@ -41,7 +42,7 @@ struct PrimitiveRuntime {
     catalog_slim: String,
     primitives_py_root: Option<PathBuf>,
     bootstrap_path: Option<PathBuf>,
-    firecrawl_enabled: bool,
+    disabled_primitives: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -56,15 +57,25 @@ pub struct SubAgentTool {
     provider: Arc<dyn Provider>,
     chat_opts: ChatOptions,
     tool_timeout: u64,
+    reflection: Option<Arc<ReflectionEngine>>,
+    disabled_primitives: Vec<String>,
 }
 
 impl SubAgentTool {
-    pub fn new(provider: Arc<dyn Provider>, mut chat_opts: ChatOptions, tool_timeout: u64) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        mut chat_opts: ChatOptions,
+        tool_timeout: u64,
+        reflection: Option<Arc<ReflectionEngine>>,
+        disabled_primitives: Vec<String>,
+    ) -> Self {
         chat_opts.max_tokens = Some(MAX_TOKENS);
         Self {
             provider,
             chat_opts,
             tool_timeout,
+            reflection,
+            disabled_primitives,
         }
     }
 }
@@ -101,9 +112,34 @@ impl Tool for SubAgentTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: instruction"))?;
         let action_name = extract_action_name(instruction);
         let artifact = prepare_executor_artifacts(&action_name, instruction)?;
-        let primitives = load_primitives_runtime(&artifact, instruction)?;
+        let primitives = load_primitives_runtime(&artifact, instruction, &self.disabled_primitives)?;
         let user_message = build_executor_user_message(instruction, &artifact);
-        let system_prompt = build_executor_system_prompt(&primitives);
+        let mut system_parts = build_executor_system_parts(&primitives);
+
+        let mut injected_guideline_ids: Vec<String> = Vec::new();
+        if let Some(ref engine) = self.reflection {
+            match engine.query_guidelines(instruction, 2).await {
+                Ok(guidelines) if !guidelines.is_empty() => {
+                    let tips: Vec<String> = guidelines
+                        .iter()
+                        .map(|g| format!("- {}", g.guideline_text))
+                        .collect();
+                    injected_guideline_ids = guidelines.iter().map(|g| g.id.clone()).collect();
+                    system_parts.push(ContentPart::Text(format!(
+                        "<system-reminder>\nLessons from past similar tasks:\n{}\n</system-reminder>",
+                        tips.join("\n")
+                    )));
+                    tracing::debug!(
+                        "ACON: injected {} guidelines into executor prompt",
+                        guidelines.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("ACON: guideline query failed: {e}");
+                }
+                _ => {}
+            }
+        }
 
         let inner_tools: Vec<Box<dyn Tool>> = vec![
             Box::new(ExecutePythonScriptTool::new(
@@ -114,7 +150,7 @@ impl Tool for SubAgentTool {
                 self.tool_timeout,
                 primitives.primitives_py_root.clone(),
                 primitives.bootstrap_path.clone(),
-                primitives.firecrawl_enabled,
+                primitives.disabled_primitives.clone(),
             )),
             Box::new(ShellTool::new(self.tool_timeout)),
         ];
@@ -122,10 +158,17 @@ impl Tool for SubAgentTool {
         let tool_map: HashMap<&str, &dyn Tool> =
             inner_tools.iter().map(|t| (t.name(), t.as_ref())).collect();
 
-        let system = ConversationMessage::system(system_prompt);
+        let system = ConversationMessage {
+            role: Role::System,
+            content: system_parts,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
+        };
 
         let mut history = vec![system, ConversationMessage::user(user_message)];
         let mut last_text = String::new();
+        let mut iteration_outcomes: Vec<IterationOutcome> = Vec::new();
 
         for _ in 0..MAX_ITERATIONS {
             let response = self
@@ -144,6 +187,13 @@ impl Tool for SubAgentTool {
                     response.text.as_deref().unwrap_or(""),
                     &artifact,
                     failed,
+                );
+                self.maybe_spawn_reflection(
+                    instruction,
+                    history,
+                    iteration_outcomes,
+                    failed,
+                    injected_guideline_ids,
                 );
                 return Ok(ToolResult {
                     output,
@@ -165,14 +215,26 @@ impl Tool for SubAgentTool {
             }
             history.push(assistant_msg);
 
+            let mut had_tool_error = false;
+            let mut had_traceback = false;
             for tc in &response.tool_calls {
                 let result = execute_inner_tool(&tool_map, tc).await;
+                if result.is_error {
+                    had_tool_error = true;
+                }
+                if result.output.contains("Traceback (most recent call last)") {
+                    had_traceback = true;
+                }
                 history.push(ConversationMessage::tool_result(
                     &tc.id,
                     result.output.truncate_for_ui(MAX_TOOL_OUTPUT_CHARS),
                     result.is_error,
                 ));
             }
+            iteration_outcomes.push(IterationOutcome {
+                had_tool_error,
+                had_traceback,
+            });
         }
 
         let final_response = self.provider.chat(&history, &[], &self.chat_opts).await?;
@@ -182,10 +244,39 @@ impl Tool for SubAgentTool {
             .filter(|t| !t.trim().is_empty())
             .unwrap_or(last_text);
         let failed = executor_result_failed(&artifact);
+        self.maybe_spawn_reflection(
+            instruction,
+            history,
+            iteration_outcomes,
+            failed,
+            injected_guideline_ids,
+        );
         Ok(ToolResult {
             output: build_executor_result(final_text.as_str(), &artifact, failed),
             is_error: failed,
         })
+    }
+}
+
+impl SubAgentTool {
+    fn maybe_spawn_reflection(
+        &self,
+        instruction: &str,
+        history: Vec<ConversationMessage>,
+        iteration_outcomes: Vec<IterationOutcome>,
+        final_failed: bool,
+        injected_guideline_ids: Vec<String>,
+    ) {
+        if let Some(ref engine) = self.reflection {
+            let ctx = ReflectionContext {
+                instruction: instruction.to_string(),
+                history,
+                iteration_outcomes,
+                final_failed,
+                injected_guideline_ids,
+            };
+            engine.spawn_reflection(ctx);
+        }
     }
 }
 
@@ -268,11 +359,18 @@ fn build_executor_user_message(instruction: &str, a: &ExecutorArtifacts) -> Stri
         .replace("{{OUT_PATH}}", &a.out_path.display().to_string())
 }
 
-fn build_executor_system_prompt(primitives: &PrimitiveRuntime) -> String {
-    EXECUTOR_SYSTEM_PROMPT
-        .replace("{{PRIMITIVES_CATALOG}}", &primitives.catalog_slim)
-        .trim_end()
-        .to_string()
+fn build_executor_system_parts(primitives: &PrimitiveRuntime) -> Vec<ContentPart> {
+    let mut parts = vec![ContentPart::Text(
+        EXECUTOR_SYSTEM_PROMPT.trim_end().to_string(),
+    )];
+    if !primitives.catalog_slim.is_empty() {
+        let primitives_block = EXECUTOR_PRIMITIVES_PROMPT
+            .replace("{{PRIMITIVES_CATALOG}}", &primitives.catalog_slim)
+            .trim_end()
+            .to_string();
+        parts.push(ContentPart::Text(primitives_block));
+    }
+    parts
 }
 
 fn executor_result_failed(a: &ExecutorArtifacts) -> bool {
@@ -347,52 +445,64 @@ fn sanitize_slug(raw: &str) -> String {
     }
 }
 
-fn load_primitives_runtime(artifact: &ExecutorArtifacts, instruction: &str) -> Result<PrimitiveRuntime> {
+fn load_primitives_runtime(
+    artifact: &ExecutorArtifacts,
+    instruction: &str,
+    disabled_primitives: &[String],
+) -> Result<PrimitiveRuntime> {
     let primitives_py_root = resolve_primitives_root()?;
     let primitives_dir = primitives_py_root.join("primitives");
     let bootstrap_path = primitives_py_root.join("bootstrap.py");
-    let has_firecrawl_key = read_non_empty_env(FIRECRAWL_KEY_ENV)
-        .or_else(|| read_non_empty_env(FIRECRAWL_ALT_KEY_ENV))
-        .is_some();
     let has_runtime_files = primitives_dir.exists() && bootstrap_path.exists();
-    let firecrawl_enabled = has_firecrawl_key && has_runtime_files;
+    let disabled_set: std::collections::HashSet<String> = disabled_primitives
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    tracing::debug!(
+        disabled_primitives = ?disabled_set,
+        has_runtime_files,
+        "executor primitives runtime resolved"
+    );
 
     let (catalog_slim, catalog_full) = if !has_runtime_files {
         let msg = "### Available Code Primitives\n- unavailable: code_primitives runtime files are missing".to_string();
         (msg.clone(), msg)
     } else {
-        let functions = discover_primitive_functions(&primitives_dir, has_firecrawl_key)?;
+        let functions = discover_primitive_functions(&primitives_dir, &disabled_set)?;
+        tracing::debug!(
+            discovered_count = functions.len(),
+            disabled_primitives = ?disabled_set,
+            "executor primitive discovery completed"
+        );
         let selected = select_primitives_for_instruction(&functions, instruction);
-        if functions.is_empty() && has_firecrawl_key {
+        if functions.is_empty() {
             let msg = "### Available Code Primitives\n- unavailable: no primitive functions discovered".to_string();
-            (msg.clone(), msg)
-        } else if functions.is_empty() {
-            let msg = format!(
-                "### Available Code Primitives\n- no active primitives found without {} (or {})",
-                FIRECRAWL_KEY_ENV, FIRECRAWL_ALT_KEY_ENV
-            );
             (msg.clone(), msg)
         } else {
             (
-                render_catalog_slim(&selected, has_firecrawl_key),
-                render_catalog_full(&selected, has_firecrawl_key),
+                render_catalog_slim(&selected, &disabled_set),
+                render_catalog_full(&selected, &disabled_set),
             )
         }
     };
 
     fs::write(&artifact.catalog_path, &catalog_full)?;
 
+    let mut disabled_primitives_sorted = disabled_set.into_iter().collect::<Vec<_>>();
+    disabled_primitives_sorted.sort();
+
     Ok(PrimitiveRuntime {
         catalog_slim,
         primitives_py_root: primitives_py_root.exists().then_some(primitives_py_root),
         bootstrap_path: bootstrap_path.exists().then_some(bootstrap_path),
-        firecrawl_enabled,
+        disabled_primitives: disabled_primitives_sorted,
     })
 }
 
 fn discover_primitive_functions(
     dir: &PathBuf,
-    has_firecrawl_key: bool,
+    disabled_primitives: &std::collections::HashSet<String>,
 ) -> Result<Vec<PrimitiveFunction>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -418,12 +528,15 @@ fn discover_primitive_functions(
     let mut result = Vec::new();
     for path in files {
         let content = fs::read_to_string(&path)?;
-        result.extend(parse_primitive_file(&content, has_firecrawl_key));
+        result.extend(parse_primitive_file(&content, disabled_primitives));
     }
     Ok(result)
 }
 
-fn parse_primitive_file(content: &str, has_firecrawl_key: bool) -> Vec<PrimitiveFunction> {
+fn parse_primitive_file(
+    content: &str,
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> Vec<PrimitiveFunction> {
     let def_re = Regex::new(
         r"(?m)^async\s+def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([^:]+))?:",
     )
@@ -443,7 +556,7 @@ fn parse_primitive_file(content: &str, has_firecrawl_key: bool) -> Vec<Primitive
         if name.starts_with('_') {
             continue;
         }
-        if name.starts_with("firecrawl_") && !has_firecrawl_key {
+        if disabled_primitives.contains(&name) {
             continue;
         }
         let args = cap
@@ -547,12 +660,17 @@ fn extract_contract_paths(text: &str, section: &str) -> Option<String> {
     None
 }
 
-fn render_catalog_slim(functions: &[PrimitiveFunction], has_firecrawl_key: bool) -> String {
+fn render_catalog_slim(
+    functions: &[PrimitiveFunction],
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> String {
     let mut out = String::from("### Available Code Primitives\n");
-    if !has_firecrawl_key {
+    if !disabled_primitives.is_empty() {
+        let mut disabled = disabled_primitives.iter().cloned().collect::<Vec<_>>();
+        disabled.sort();
         out.push_str(&format!(
-            "- note: firecrawl primitives disabled, missing {} (or {})\n\n",
-            FIRECRAWL_KEY_ENV, FIRECRAWL_ALT_KEY_ENV
+            "- note: disabled via config: {}\n\n",
+            disabled.join(", ")
         ));
     }
     for f in functions {
@@ -561,22 +679,21 @@ fn render_catalog_slim(functions: &[PrimitiveFunction], has_firecrawl_key: bool)
             out.push_str(&format!(": {}", compact_inline(&f.summary, MAX_SUMMARY_CHARS)));
         }
         out.push('\n');
-        if !f.output_contract.is_empty() {
-            out.push_str(&format!(
-                "  contract: {}\n",
-                compact_inline(&f.output_contract, MAX_CONTRACT_CHARS)
-            ));
-        }
     }
     out
 }
 
-fn render_catalog_full(functions: &[PrimitiveFunction], has_firecrawl_key: bool) -> String {
+fn render_catalog_full(
+    functions: &[PrimitiveFunction],
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> String {
     let mut out = String::from("### Available Code Primitives\n");
-    if !has_firecrawl_key {
+    if !disabled_primitives.is_empty() {
+        let mut disabled = disabled_primitives.iter().cloned().collect::<Vec<_>>();
+        disabled.sort();
         out.push_str(&format!(
-            "- note: firecrawl primitives disabled, missing {} (or {})\n\n",
-            FIRECRAWL_KEY_ENV, FIRECRAWL_ALT_KEY_ENV
+            "- note: disabled via config: {}\n\n",
+            disabled.join(", ")
         ));
     }
     for f in functions {

@@ -1,34 +1,36 @@
-# Code Primitives 规范
+# Code Primitives Specification
 
-本目录用于存放可被 Executor 直接注入并调用的 Python 原语。
+This directory stores Python primitives that can be injected and called directly by the Executor.
 
-目标是让模型在机械执行阶段优先复用稳定原语，减少临时拼接脚本、降低参数幻觉和上下文噪声。
+The goal is to make the model reuse stable primitives during execution, reducing temporary script stitching, parameter hallucination, and context noise.
 
-## 依赖策略
+## Dependency Policy
 
-- 原语实现默认优先 Python 标准库。
-- 只有在无法满足需求时才引入第三方依赖。
-- 若引入第三方依赖，必须在容器镜像中预装并在本 README 明确记录，禁止让 Executor 在任务中临时安装依赖。
-- 缺失依赖必须返回 `DEPENDENCY_MISSING`，不能让原语直接崩溃。
+- Primitive implementations should prefer the Python standard library by default.
+- Introduce third-party dependencies only when the standard library cannot satisfy the requirement.
+- If a third-party dependency is required, it must be preinstalled in the container image and explicitly documented in this README. The Executor must not install dependencies on the fly during a task.
+- Missing dependencies must return `DEPENDENCY_MISSING` instead of crashing the primitive.
 
-## 目录结构
+## Directory Structure
 
 - `python/bootstrap.py`
-  - 运行时注入入口，把原语注册到脚本全局命名空间
+  - Runtime injection entry point that registers primitives into the script global namespace
+- `python/sitecustomize.py`
+  - Python startup hook that injects primitives into `builtins` for direct access in any Python session
 - `python/primitives/types.py`
-  - `ActionStatus`、`PrimitiveResult` 统一类型
+  - Shared types: `ActionStatus` and `PrimitiveResult`
 - `python/primitives/base.py`
-  - 通用能力：硬超时、重试、输入校验、遥测落盘、Firecrawl HTTP 封装
+  - Shared capabilities: hard timeout, retry, input validation, telemetry persistence, Firecrawl HTTP wrapper
 - `python/primitives/catalog.py`
-  - 原语注册表
+  - Primitive registry
 - `python/primitives/*.py`
-  - 具体原语实现文件
+  - Concrete primitive implementation files
 
-## 原语设计硬约束
+## Hard Constraints for Primitive Design
 
-### 1. 强类型与结构化返回
+### 1. Strong Typing and Structured Return
 
-每个原语必须返回 `PrimitiveResult.to_public_dict()` 结构：
+Every primitive must return the `PrimitiveResult.to_public_dict()` structure:
 
 - `status`
 - `data`
@@ -36,68 +38,68 @@
 - `error_message`
 - `retryable`
 
-状态码使用 `ActionStatus`，禁止返回随意字符串。
+Status codes must use `ActionStatus`. Do not return arbitrary status strings.
 
-注入给 Executor 的原语函数统一为 `async def`。调用方必须使用 `await`，不能按同步函数直接取值。
+All primitives injected into Executor must be declared as `async def`. Callers must use `await` and must not treat them as synchronous functions.
 
-### 2. 强制硬超时
+### 2. Mandatory Hard Timeout
 
-任何网络 I/O 或重计算操作都必须使用内部硬超时常量，不信任模型传入的 timeout 参数。
+Any network I/O or heavy computation must use internal hard timeout constants. Do not trust timeout values supplied by the model.
 
-超时必须返回：
+Timeout failures must return:
 
 - `status = ActionStatus.TIMEOUT`
-- `error_code = "operation_timeout"` 或 `"network_timeout"`
+- `error_code = "operation_timeout"` or `"network_timeout"`
 
-### 3. 深度输入校验
+### 3. Deep Input Validation
 
-仅有类型注解不够。必须在原语内部做边界检查和格式检查。
+Type annotations alone are not enough. Boundary and format validation must be performed inside each primitive.
 
-示例：
+Examples:
 
-- URL 必须 `http/https`
-- `limit` 必须在定义区间
-- `sources/formats` 必须在白名单
+- URL must be `http/https`
+- `limit` must stay within the defined range
+- `sources/formats` must be in allowlists
 
-校验失败必须返回：
+Validation failure must return:
 
 - `status = ActionStatus.INVALID_ARGUMENT`
-- 明确 `error_message`（可指导模型下轮自修复）
+- A clear `error_message` that can guide model self-correction on the next iteration
 
-### 4. 防御性错误处理
+### 4. Defensive Error Handling
 
-原语内部不可把底层异常直接抛给上层导致进程失败。
+Primitives must not rethrow low-level exceptions and crash the upper execution flow.
 
-要求：
+Requirements:
 
-- 捕获依赖缺失、网络异常、上游 HTTP 异常
-- 转换为标准状态码（`DEPENDENCY_MISSING`、`UPSTREAM_ERROR`、`RATE_LIMITED` 等）
-- 标注是否可重试（`retryable`）
+- Catch missing dependency, network error, and upstream HTTP error
+- Convert to standard status codes (`DEPENDENCY_MISSING`, `UPSTREAM_ERROR`, `RATE_LIMITED`, etc.)
+- Mark whether the result is retryable (`retryable`)
 
-### 5. 幂等优先
+### 5. Idempotency First
 
-原语设计默认幂等。相同参数重复调用，不应造成状态污染。
+Primitives should be idempotent by default. Repeating the same call with identical parameters should not pollute state.
 
-避免：
+Avoid:
 
-- append 语义写文件
-- 非必要副作用
+- Append-style file writes
+- Unnecessary side effects
 
-### 6. 静默遥测与结果隔离
+### 6. Silent Telemetry and Result Isolation
 
-遥测信息只写任务工件内 `telemetry.jsonl`，不直接塞给 Planner 上下文。
+Telemetry must be written only to `telemetry.jsonl` inside task artifacts and must not be directly injected into Planner context.
 
-遥测最少包含：
+Minimum telemetry fields:
 
-- primitive 名称
-- 状态码
-- 耗时
-- 重试次数
-- 关键错误码
+- primitive name
+- status code
+- duration
+- retry count
+- key error code
 
-## Docstring 规范（面向 LLM）
+## Docstring Specification (LLM-Oriented)
 
-每个对外原语必须包含以下段落：
+Each public primitive must contain these sections:
 
 - `[What it does]`
 - `[Args]`
@@ -106,45 +108,47 @@
 - `[When NOT to use]`
 - `[Common Mistakes]`
 
-重点：必须明确“不要怎么用”，用于降低模型误选原语概率。
+Important: `[When NOT to use]` must clearly explain misuse cases to reduce wrong primitive selection by the model.
 
-`[Output Contract]` 必须写清楚成功判定与关键字段路径，供 Executor 严格按契约读取，禁止自由猜测键名。
+`[Output Contract]` must explicitly define the success condition and key field paths so Executor can read them strictly by contract instead of guessing key names.
 
-## 命名规范
+## Naming Convention
 
-- 原语函数名必须精确、语义完整，避免缩写和模糊名称
-- 使用动词+对象，例如：
+- Primitive function names must be precise and semantically complete. Avoid abbreviations and vague names.
+- Use verb + object naming, for example:
   - `firecrawl_scrape_page`
   - `firecrawl_search_web`
-- 不使用“网页爬取”这类自然语言函数名
+- Do not use natural-language names such as "web page crawling" as function identifiers.
 
-## 环境变量门控
+## Environment Variable Gating
 
-Firecrawl 原语只在具备配置时可用：
+Firecrawl primitives are available only when configuration is present:
 
-- `FIRECRAWL_API_KEY`（主）
-- `FIRECRAWL_KEY`（兼容）
-- `FIRECRAWL_BASE_URL`（可选）
+- `FIRECRAWL_API_KEY` (primary)
+- `FIRECRAWL_KEY` (compatibility fallback)
+- `FIRECRAWL_BASE_URL` (optional)
 
-如果 key 缺失，原语应返回 `DEPENDENCY_MISSING`，并由上层避免继续暴力重试。
+If the key is missing, the primitive must return `DEPENDENCY_MISSING`, and upper layers should avoid aggressive retry loops.
 
-## 新增原语步骤
+Primitive enablement uses a blacklist. All primitives are enabled by default; disable selected names via `agent.disabled_primitives` in `zerda.toml`.
 
-1. 在 `python/primitives/` 新建文件并实现 async 函数
-2. 按本规范补齐校验、硬超时、重试、Docstring、结构化返回
-3. 在 `python/primitives/catalog.py` 注册函数
-4. 确认函数签名与 Docstring 可被扫描器识别（会注入到 Executor catalog）
+## Steps to Add a New Primitive
 
-## 当前内置原语
+1. Create a new file under `python/primitives/` and implement an async function.
+2. Add validation, hard timeout, retry, docstring, and structured return according to this spec.
+3. Register the function in `python/primitives/catalog.py`.
+4. Ensure function signature and docstring can be parsed by the scanner (they are injected into the Executor catalog).
+
+## Built-in Primitives
 
 - `extract_main_text_from_html`
-  - 标准库原语，从 HTML 提取正文与标题
+  - Standard-library primitive that extracts readable main text and title from HTML
 - `firecrawl_scrape_page`
-  - 需 `FIRECRAWL_API_KEY`
+  - Requires `FIRECRAWL_API_KEY`
 - `firecrawl_search_web`
-  - 需 `FIRECRAWL_API_KEY`
+  - Requires `FIRECRAWL_API_KEY`
 
-## 原语模板
+## Primitive Template
 
 ```python
 from __future__ import annotations
@@ -168,7 +172,7 @@ async def your_primitive(...) -> dict[str, Any]:
     ...
 
     [Returns]
-    PrimitiveResult 公共字典: status/data/error_code/error_message/retryable
+    PrimitiveResult public dict: status/data/error_code/error_message/retryable
 
     [When NOT to use]
     ...

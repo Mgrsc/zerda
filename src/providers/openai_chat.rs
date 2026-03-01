@@ -44,9 +44,16 @@ impl OpenAiChatProvider {
         for msg in messages {
             match &msg.role {
                 Role::System => {
+                    let content = build_openai_content_parts(
+                        &msg.content,
+                        "text",
+                        "image_url",
+                        "image_url",
+                        true,
+                    );
                     api_messages.push(json!({
                         "role": "system",
-                        "content": msg.text_content()
+                        "content": content
                     }));
                 }
                 Role::User => {

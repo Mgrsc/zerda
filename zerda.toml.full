@@ -40,6 +40,7 @@ show_usage = false                      # print token usage at the end of each t
 max_memory_file_size = 102400           # maximum memory file size in bytes
 session_cleanup_days = 7                # auto-clean sessions older than N days
 tool_timeout = 300                      # tool execution timeout in seconds
+disabled_primitives = []                # blacklist primitive names; all primitives are enabled when empty
 
 [agent.primary_model]
 model = "openai@${OPENAI_MODEL}"        # required: provider_id@model_name
@@ -54,6 +55,14 @@ vision = true                           # whether to send images to the model (d
 # temperature = 1.0
 # top_p = 1.0
 # max_tokens = 4096
+
+# ACON reflection system (requires Qdrant + OPENAI_API_KEY for embeddings)
+# acon_enabled = true                    # default: false
+# acon_embedding_dim = 1536              # embedding vector dimension; must match your model (e.g. bge-m3 = 1024)
+# Embedding env vars: ACON_EMBEDDING_MODEL, ACON_EMBEDDING_BASE_URL, ACON_EMBEDDING_API_KEY
+# [agent.acon_model]                     # ACON compression/analysis model; omit to disable ACON
+# model = "openai@gpt-4.1-mini"
+# max_tokens = 256
 
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported

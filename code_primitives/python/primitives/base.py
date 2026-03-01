@@ -80,26 +80,32 @@ def emit_telemetry(
 def validate_http_url(raw: str, field_name: str = "url") -> str:
     value = str(raw or "").strip()
     if not value:
-        raise ValueError(f"参数 {field_name} 不能为空")
+        raise ValueError(f"Parameter {field_name} must not be empty")
     if len(value) > MAX_URL_LENGTH:
-        raise ValueError(f"参数 {field_name} 超过长度限制 {MAX_URL_LENGTH}")
+        raise ValueError(
+            f"Parameter {field_name} exceeds max length {MAX_URL_LENGTH}"
+        )
     if not URL_PATTERN.match(value):
-        raise ValueError(f"参数 {field_name} 必须以 http:// 或 https:// 开头")
+        raise ValueError(
+            f"Parameter {field_name} must start with http:// or https://"
+        )
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"参数 {field_name} 不是合法的 URL")
+        raise ValueError(f"Parameter {field_name} is not a valid URL")
     return value
 
 
 def validate_int_range(raw: Any, field_name: str, min_value: int, max_value: int) -> int:
     if isinstance(raw, bool):
-        raise ValueError(f"参数 {field_name} 必须是整数")
+        raise ValueError(f"Parameter {field_name} must be an integer")
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(f"参数 {field_name} 必须是整数") from None
+        raise ValueError(f"Parameter {field_name} must be an integer") from None
     if value < min_value or value > max_value:
-        raise ValueError(f"参数 {field_name} 必须在 {min_value} 到 {max_value} 之间")
+        raise ValueError(
+            f"Parameter {field_name} must be between {min_value} and {max_value}"
+        )
     return value
 
 
@@ -137,7 +143,9 @@ def firecrawl_post(
     timeout_secs: float,
 ) -> PrimitiveResult:
     if not ctx.firecrawl_api_key:
-        return dependency_missing_result("缺少 FIRECRAWL_API_KEY，无法调用 firecrawl 原语")
+        return dependency_missing_result(
+            "Missing FIRECRAWL_API_KEY; cannot call firecrawl primitives"
+        )
     url = f"{ctx.firecrawl_base_url}{endpoint}"
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(url=url, data=body, method="POST")
@@ -164,7 +172,7 @@ def firecrawl_post(
             return PrimitiveResult(
                 status=ActionStatus.RATE_LIMITED,
                 error_code="rate_limited",
-                error_message=f"Firecrawl 返回 429: {parsed}",
+                error_message=f"Firecrawl returned 429: {parsed}",
                 retryable=True,
                 telemetry={"http_status": status_code},
             )
@@ -172,7 +180,7 @@ def firecrawl_post(
         return PrimitiveResult(
             status=ActionStatus.UPSTREAM_ERROR,
             error_code="upstream_http_error",
-            error_message=f"Firecrawl 返回 {status_code}: {parsed}",
+            error_message=f"Firecrawl returned {status_code}: {parsed}",
             retryable=retryable,
             telemetry={"http_status": status_code},
         )
@@ -182,14 +190,14 @@ def firecrawl_post(
         return PrimitiveResult(
             status=ActionStatus.TIMEOUT if timed_out else ActionStatus.UPSTREAM_ERROR,
             error_code="network_timeout" if timed_out else "network_error",
-            error_message=f"网络请求失败: {reason}",
+            error_message=f"Network request failed: {reason}",
             retryable=True,
         )
     except socket.timeout:
         return PrimitiveResult(
             status=ActionStatus.TIMEOUT,
             error_code="network_timeout",
-            error_message="网络请求超时",
+            error_message="Network request timed out",
             retryable=True,
         )
 
@@ -221,14 +229,16 @@ async def run_with_guard(
             result = PrimitiveResult(
                 status=ActionStatus.TIMEOUT,
                 error_code="operation_timeout",
-                error_message=f"原语执行超过硬超时 {hard_timeout_secs}s",
+                error_message=(
+                    f"Primitive execution exceeded hard timeout {hard_timeout_secs}s"
+                ),
                 retryable=True,
             )
         except Exception as exc:
             result = PrimitiveResult(
                 status=ActionStatus.INTERNAL_ERROR,
                 error_code="internal_error",
-                error_message=f"原语内部异常: {exc}",
+                error_message=f"Primitive internal error: {exc}",
                 retryable=False,
             )
         last = result

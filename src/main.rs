@@ -20,6 +20,7 @@ mod logging;
 mod memory;
 mod prompt;
 mod providers;
+mod reflection;
 mod rich_content;
 mod runner;
 mod skills;
@@ -160,11 +161,56 @@ async fn main() -> Result<()> {
     let compression_provider = (fast_provider.clone(), fast_chat_opts.clone());
     let subagent_provider = (fast_provider, fast_chat_opts);
 
+    let reflection_engine = if cfg.agent.acon_enabled {
+        if let Some(ref acon_mc) = cfg.agent.acon_model {
+            match config::ModelRef::parse(&acon_mc.model) {
+                Ok(acon_ref) => {
+                    match registry.get_or_create(&acon_ref.provider_id) {
+                        Ok(acon_provider) => {
+                            let acon_opts = providers::ChatOptions::from_model_config(
+                                acon_mc,
+                                &acon_ref.model_name,
+                            );
+                            match reflection::ReflectionEngine::try_from_env(
+                                acon_provider,
+                                acon_opts,
+                                cfg.agent.acon_embedding_dim,
+                            ) {
+                                Some(engine) => match engine.ensure_collection().await {
+                                    Ok(()) => Some(Arc::new(engine)),
+                                    Err(e) => {
+                                        tracing::warn!("ACON: collection setup failed: {e}");
+                                        None
+                                    }
+                                },
+                                None => None,
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("ACON: provider '{}' init failed: {e}", acon_ref.provider_id);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("ACON: invalid acon_model reference: {e}");
+                    None
+                }
+            }
+        } else {
+            tracing::debug!("ACON: acon_enabled=true but acon_model not configured");
+            None
+        }
+    } else {
+        None
+    };
+
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
         max_memory_chars,
         config_path: cli.config.clone(),
         reload_signal: reload_signal.clone(),
+        disabled_primitives: cfg.agent.disabled_primitives.clone(),
     };
     let tools_dependencies = tools::BuiltinToolsDependencies {
         memory: Arc::clone(&mem),
@@ -172,6 +218,7 @@ async fn main() -> Result<()> {
         skills: Arc::clone(&shared_skills),
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
+        reflection: reflection_engine,
     };
     let (all_tools, todo_handle) = tools::builtin_tools((tools_runtime, tools_dependencies).into());
 

@@ -14,7 +14,6 @@ from .base import (
 
 MAX_QUERY_LENGTH = 500
 MAX_LIMIT = 10
-ALLOWED_SOURCES = {"web", "news", "images"}
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
@@ -26,43 +25,24 @@ def _as_dict(raw: Any) -> dict[str, Any]:
 def _validate_query(raw: Any) -> str:
     value = str(raw or "").strip()
     if not value:
-        raise ValueError("参数 query 不能为空")
+        raise ValueError("Parameter query must not be empty")
     if len(value) > MAX_QUERY_LENGTH:
-        raise ValueError(f"参数 query 超过长度限制 {MAX_QUERY_LENGTH}")
+        raise ValueError(f"Parameter query exceeds max length {MAX_QUERY_LENGTH}")
     return value
-
-
-def _validate_sources(raw: Any) -> list[dict[str, str]]:
-    if raw is None:
-        return [{"type": "web"}]
-    if not isinstance(raw, list):
-        raise ValueError("参数 sources 必须是数组")
-    out: list[dict[str, str]] = []
-    for item in raw:
-        source_type = ""
-        if isinstance(item, str):
-            source_type = item.strip()
-        elif isinstance(item, dict):
-            source_type = str(item.get("type", "")).strip()
-        if source_type not in ALLOWED_SOURCES:
-            raise ValueError(f"sources 包含不支持的 type: {source_type}")
-        out.append({"type": source_type})
-    if not out:
-        raise ValueError("参数 sources 不能为空数组")
-    return out
 
 
 def _search_operation(
     ctx: PrimitiveContext,
     query: str,
     limit: int,
-    sources: list[dict[str, str]],
+    lang: str | None,
 ):
     payload: dict[str, Any] = {
         "query": query,
         "limit": limit,
-        "sources": sources,
     }
+    if lang:
+        payload["lang"] = lang
     return firecrawl_post(
         ctx=ctx,
         endpoint="/v1/search",
@@ -96,31 +76,30 @@ def _normalize_search_data(raw: Any) -> Any:
 async def firecrawl_search_web(
     query: str,
     limit: int = 5,
-    sources: list[dict[str, str]] | list[str] | None = None,
+    lang: str | None = None,
 ) -> dict[str, Any]:
     """
     [What it does]
-    调用 Firecrawl search 接口进行网页搜索。
+    Calls the Firecrawl search API for web search.
 
     [Args]
-    query: 搜索词
-    limit: 结果数量 (1~10，默认 5)
-    sources: 数据源列表，支持 web/news/images
+    query: Search query text.
+    limit: Number of results (1~10, default 5).
+    lang: Language code (optional, for example "zh", "en").
 
     [Output Contract]
     res = await firecrawl_search_web("query")
-    assert res["status"] == "ok"           # 成功检查，唯一判断条件
-    res["data"]["results"]                 # 搜索结果数组
-    res["data"]["success"]                 # Firecrawl 成功标记 (bool)
+    assert res["status"] == "ok"           # Success check, only judgment condition.
+    res["data"]["results"]                 # Search result array.
+    res["data"]["success"]                 # Firecrawl success flag (bool).
 
     [When NOT to use]
-    已有目标 URL 时用 firecrawl_scrape_page。
+    Use firecrawl_scrape_page when you already have the target URL.
     """
     ctx = load_context()
     try:
         parsed_query = _validate_query(query)
         parsed_limit = validate_int_range(limit, "limit", 1, MAX_LIMIT)
-        parsed_sources = _validate_sources(sources)
     except ValueError as exc:
         return invalid_argument_result(str(exc)).to_public_dict()
 
@@ -131,7 +110,7 @@ async def firecrawl_search_web(
             ctx=ctx,
             query=parsed_query,
             limit=parsed_limit,
-            sources=parsed_sources,
+            lang=lang,
         ),
     )
     if result.status.value == "ok":

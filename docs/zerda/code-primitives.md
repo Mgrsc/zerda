@@ -11,6 +11,7 @@ Primitives are located in `code_primitives/python/`:
 ```
 code_primitives/python/
 ├── bootstrap.py              # Runtime injection entry point
+├── sitecustomize.py          # Global Python startup injection hook
 ├── primitives/
 │   ├── types.py              # Standard return types
 │   ├── base.py               # Common utilities (timeout, retry, telemetry)
@@ -46,6 +47,17 @@ Web search via Firecrawl API.
 - Input: Search query
 - Output: Search results with normalized flat access
 
+## Primitive Enablement
+
+All primitives are enabled by default.
+
+To disable specific primitives, configure a blacklist in `zerda.toml`:
+
+```toml
+[agent]
+disabled_primitives = ["firecrawl_search_web"]
+```
+
 ## Standard Return Contract
 
 All primitives return a standardized structure:
@@ -74,6 +86,6 @@ All primitives return a standardized structure:
 Primitives are automatically available in executor scripts. The executor injects environment variables:
 
 - `EXECUTOR_PRIMITIVES_PY_ROOT`: Path to primitives directory
-- `EXECUTOR_ENABLE_FIRECRAWL_PRIMITIVES`: "0" or "1"
+- `EXECUTOR_DISABLED_PRIMITIVES`: JSON array or comma-separated primitive blacklist
 
-The bootstrap module handles importing and making primitives available.
+The bootstrap and startup hooks handle importing and making primitives available.

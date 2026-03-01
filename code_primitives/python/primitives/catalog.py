@@ -9,11 +9,13 @@ from .firecrawl_search_web import firecrawl_search_web
 PrimitiveCallable = Callable[..., Awaitable[dict[str, Any]]]
 
 
-def get_primitive_registry(enable_firecrawl: bool) -> dict[str, PrimitiveCallable]:
+def get_primitive_registry(
+    disabled_primitives: set[str] | None = None,
+) -> dict[str, PrimitiveCallable]:
+    disabled = disabled_primitives or set()
     registry: dict[str, PrimitiveCallable] = {
         "extract_main_text_from_html": extract_main_text_from_html,
+        "firecrawl_scrape_page": firecrawl_scrape_page,
+        "firecrawl_search_web": firecrawl_search_web,
     }
-    if enable_firecrawl:
-        registry["firecrawl_scrape_page"] = firecrawl_scrape_page
-        registry["firecrawl_search_web"] = firecrawl_search_web
-    return registry
+    return {name: fn for name, fn in registry.items() if name not in disabled}

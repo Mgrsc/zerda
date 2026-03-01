@@ -23,7 +23,7 @@ pub struct ExecutePythonScriptTool {
     timeout_secs: u64,
     primitives_py_root: Option<PathBuf>,
     bootstrap_path: Option<PathBuf>,
-    firecrawl_enabled: bool,
+    disabled_primitives: Vec<String>,
 }
 
 impl ExecutePythonScriptTool {
@@ -35,7 +35,7 @@ impl ExecutePythonScriptTool {
         timeout_secs: u64,
         primitives_py_root: Option<PathBuf>,
         bootstrap_path: Option<PathBuf>,
-        firecrawl_enabled: bool,
+        disabled_primitives: Vec<String>,
     ) -> Self {
         Self {
             script_path,
@@ -45,7 +45,7 @@ impl ExecutePythonScriptTool {
             timeout_secs,
             primitives_py_root,
             bootstrap_path,
-            firecrawl_enabled,
+            disabled_primitives,
         }
     }
 }
@@ -135,7 +135,7 @@ impl Tool for ExecutePythonScriptTool {
             script = %self.script_path.display(),
             timeout_secs = self.timeout_secs,
             script_bytes = code_bytes,
-            firecrawl_enabled = self.firecrawl_enabled,
+            disabled_primitives = ?self.disabled_primitives,
             "execute_python_script start"
         );
 
@@ -149,8 +149,9 @@ impl Tool for ExecutePythonScriptTool {
             .env("EXECUTOR_LOG_PATH", &self.log_path)
             .env("EXECUTOR_TELEMETRY_PATH", &self.telemetry_path)
             .env(
-                "EXECUTOR_ENABLE_FIRECRAWL_PRIMITIVES",
-                if self.firecrawl_enabled { "1" } else { "0" },
+                "EXECUTOR_DISABLED_PRIMITIVES",
+                serde_json::to_string(&self.disabled_primitives)
+                    .unwrap_or_else(|_| "[]".to_string()),
             );
 
         if let Some(root) = &self.primitives_py_root {

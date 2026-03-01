@@ -29,13 +29,13 @@ impl AnthropicProvider {
         tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Value {
-        let mut system_text = String::new();
+        let mut system_parts: Vec<ContentPart> = Vec::new();
         let mut api_messages: Vec<Value> = Vec::new();
 
         for msg in messages {
             match &msg.role {
                 Role::System => {
-                    system_text = msg.text_content();
+                    system_parts.extend(msg.content.iter().cloned());
                 }
                 Role::User => {
                     let content = Self::build_content_parts(&msg.content);
@@ -100,8 +100,16 @@ impl AnthropicProvider {
             body["max_tokens"] = json!(4096);
         }
 
-        if !system_text.is_empty() {
-            body["system"] = json!(system_text);
+        if !system_parts.is_empty() {
+            if system_parts.len() == 1 {
+                if let ContentPart::Text(t) = &system_parts[0] {
+                    body["system"] = json!(t);
+                } else {
+                    body["system"] = Self::build_content_parts(&system_parts);
+                }
+            } else {
+                body["system"] = Self::build_content_parts(&system_parts);
+            }
         }
 
         if !tools.is_empty() {

@@ -57,4 +57,4 @@ These are automatically set in executor Python scripts:
 | `EXECUTOR_LOG_PATH` | Path for log file |
 | `EXECUTOR_TELEMETRY_PATH` | Path for telemetry JSONL |
 | `EXECUTOR_PRIMITIVES_PY_ROOT` | Code primitives root path |
-| `EXECUTOR_ENABLE_FIRECRAWL_PRIMITIVES` | "0" or "1" |
+| `EXECUTOR_DISABLED_PRIMITIVES` | JSON array or comma-separated primitive blacklist |

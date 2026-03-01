@@ -12,3 +12,4 @@ example-docs/
 docker-compose.test.yml
 zerda.test.toml
 mcp.toml.test
+.env.test

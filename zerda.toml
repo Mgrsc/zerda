@@ -13,6 +13,7 @@ base_url = "${OPENAI_BASE_URL}"         # API root up to version path, e.g. http
 # api_key = "${ANTHROPIC_API_KEY}"
 
 [agent]
+disabled_primitives = []                # primitive blacklist, e.g. ["firecrawl_search_web"]
 
 [agent.primary_model]
 model = "openai@${OPENAI_MODEL}"        # <provider_id>@<model_name>

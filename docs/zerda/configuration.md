@@ -49,6 +49,7 @@ max_tool_output_chars = 30000 # Truncate tool results exceeding this (default: 3
 max_memory_tokens = 2000      # Max tokens for memory content (default: 2000)
 max_memory_file_size = 102400 # MEMORY.md max size in bytes (default: 102400)
 tool_timeout = 300            # Tool execution timeout in seconds (default: 300)
+disabled_primitives = []      # Primitive blacklist; all enabled when empty
 session_cleanup_days = 7      # Auto-clean sessions older than N days (default: 7)
 show_usage = false            # Print token usage after each turn (default: false)
 # max_budget_tokens = 100000  # Session token budget, unlimited by default

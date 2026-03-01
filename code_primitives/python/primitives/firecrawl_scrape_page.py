@@ -28,17 +28,17 @@ def _validate_formats(raw: Any) -> list[str]:
     if raw is None:
         return ["markdown"]
     if not isinstance(raw, list):
-        raise ValueError("参数 formats 必须是字符串数组")
+        raise ValueError("Parameter formats must be a list of strings")
     cleaned: list[str] = []
     for item in raw:
         value = str(item).strip()
         if not value:
             continue
         if value not in ALLOWED_FORMATS:
-            raise ValueError(f"formats 包含不支持的值: {value}")
+            raise ValueError(f"formats contains an unsupported value: {value}")
         cleaned.append(value)
     if not cleaned:
-        raise ValueError("参数 formats 不能为空数组")
+        raise ValueError("Parameter formats must not be an empty list")
     return cleaned
 
 
@@ -85,6 +85,19 @@ def _normalize_scrape_data(raw: Any) -> Any:
         "result": payload,
     }
     normalized.update(payload_data)
+    links_value = payload_data.get("links")
+    key_links: list[str] = []
+    if isinstance(links_value, list):
+        key_links = [str(item) for item in links_value if str(item).strip()]
+    elif isinstance(links_value, dict):
+        internal_links = links_value.get("internal_links")
+        external_links = links_value.get("external_links")
+        if isinstance(internal_links, list):
+            key_links.extend(str(item) for item in internal_links if str(item).strip())
+        if isinstance(external_links, list):
+            key_links.extend(str(item) for item in external_links if str(item).strip())
+    normalized["key_links"] = key_links
+    normalized["links_raw_type"] = type(links_value).__name__ if links_value is not None else "none"
     return normalized
 
 
@@ -97,27 +110,33 @@ async def firecrawl_scrape_page(
 ) -> dict[str, Any]:
     """
     [What it does]
-    调用 Firecrawl scrape 接口抓取单个页面内容。
+    Calls the Firecrawl scrape API to crawl a single page's content.
 
     [Args]
-    url: 目标页面 URL (http/https)
-    formats: 输出格式列表，默认 ["markdown"]。支持: markdown, html, rawHtml, links, screenshot, json
-    only_main_content: 仅保留正文 (默认 True)
-    max_age: 缓存秒数 (0~86400)
-    wait_for_ms: JS 渲染等待毫秒 (0~20000)
+    url: Target page URL (http/https)
+    formats: List of output formats, default is ["markdown"]. Supported formats: markdown, html, rawHtml, links, screenshot, json
+    only_main_content: Only retain main content (default True)
+    max_age: Cache duration in seconds (0~86400)
+    wait_for_ms: Milliseconds to wait for JS rendering (0~20000)
 
     [Output Contract]
     res = await firecrawl_scrape_page("https://example.com")
-    assert res["status"] == "ok"           # 成功检查，唯一判断条件
-    res["data"]["markdown"]                # 正文 Markdown (默认格式)
-    res["data"]["metadata"]["title"]       # 页面标题
-    res["data"]["metadata"]["description"] # 页面描述
-    res["data"]["html"]                    # HTML (需 formats 含 "html")
-    res["data"]["success"]                 # Firecrawl 成功标记 (bool)
-    res["data"]["http_status"]             # HTTP 状态码 (int)
+    assert res["status"] == "ok"           # Success check, the only judgment condition
+    res["data"]["markdown"]                # Main content in Markdown (default format)
+    res["data"]["metadata"]["title"]       # Page title
+    res["data"]["metadata"]["description"] # Page description
+    res["data"]["html"]                    # HTML (requires "html" to be included in formats)
+    res["data"]["key_links"]               # Stable merged links list (list[str])
+    res["data"]["links_raw_type"]          # Original links field type: list|dict|none
+    res["data"]["success"]                 # Firecrawl success flag (bool)
+    res["data"]["http_status"]             # HTTP status code (int)
 
     [When NOT to use]
-    需要搜索发现 URL 时用 firecrawl_search_web。
+    Use firecrawl_search_web when you need to discover URLs via search.
+
+    [Common Mistakes]
+    Do not assume res["data"]["links"] is always a dict.
+    Use res["data"]["key_links"] as the stable link list field.
     """
     ctx = load_context()
     try:
@@ -134,7 +153,7 @@ async def firecrawl_scrape_page(
             else None
         )
         if not isinstance(only_main_content, bool):
-            raise ValueError("参数 only_main_content 必须是布尔值")
+            raise ValueError("Parameter only_main_content must be a boolean")
     except ValueError as exc:
         return invalid_argument_result(str(exc)).to_public_dict()
 
