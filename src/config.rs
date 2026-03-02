@@ -17,6 +17,8 @@ pub struct Config {
     pub providers: Vec<ProviderEndpoint>,
     pub agent: AgentConfig,
     #[serde(default)]
+    pub reflection: ReflectionConfig,
+    #[serde(default)]
     pub mcp: Vec<McpServerConfig>,
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
@@ -128,12 +130,6 @@ pub struct AgentConfig {
     pub tool_timeout: u64,
     #[serde(default)]
     pub disabled_primitives: Vec<String>,
-    #[serde(default)]
-    pub acon_enabled: bool,
-    #[serde(default)]
-    pub acon_model: Option<ModelConfig>,
-    #[serde(default)]
-    pub acon_embedding_dim: Option<u64>,
 }
 
 const MIN_MAX_ITERATIONS: usize = 10;
@@ -155,6 +151,52 @@ const fn default_session_cleanup_days() -> u64 {
 }
 const fn default_tool_timeout() -> u64 {
     300
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReflectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, alias = "model")]
+    pub llm_model: String,
+    #[serde(default = "default_reflection_max_tokens")]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_dim: Option<u64>,
+}
+
+const fn default_reflection_max_tokens() -> Option<u32> {
+    Some(2048)
+}
+
+impl Default for ReflectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            llm_model: String::new(),
+            max_tokens: default_reflection_max_tokens(),
+            embedding_model: None,
+            embedding_dim: None,
+        }
+    }
+}
+
+impl ReflectionConfig {
+    pub fn as_model_config(&self) -> Option<ModelConfig> {
+        let model = self.llm_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        Some(ModelConfig {
+            model: model.to_string(),
+            vision: false,
+            temperature: Some(0.7),
+            top_p: Some(0.95),
+            max_tokens: self.max_tokens,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -466,6 +508,11 @@ fn validate_config(config: &Config) -> Result<()> {
 
     let provider_ids: std::collections::HashSet<&str> =
         config.providers.iter().map(|p| p.id.as_str()).collect();
+    let providers_by_id: std::collections::HashMap<&str, &ProviderEndpoint> = config
+        .providers
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
 
     let primary =
         ModelRef::parse(&config.agent.primary_model.model).context("agent.primary_model.model")?;
@@ -484,6 +531,55 @@ fn validate_config(config: &Config) -> Result<()> {
             fast.provider_id
         );
         validate_model_config(fm, "agent.fast_model")?;
+    }
+
+    if config.reflection.enabled {
+        anyhow::ensure!(
+            config.reflection.as_model_config().is_some(),
+            "reflection.enabled=true requires non-empty reflection.llm_model (provider_id@model_name)"
+        );
+    }
+
+    if let Some(reflection_model) = config.reflection.as_model_config() {
+        let reflection_ref =
+            ModelRef::parse(&reflection_model.model).context("reflection.llm_model")?;
+        anyhow::ensure!(
+            provider_ids.contains(reflection_ref.provider_id.as_str()),
+            "reflection.llm_model references unknown provider '{}'",
+            reflection_ref.provider_id
+        );
+        validate_model_config(&reflection_model, "reflection.llm_model")?;
+    }
+
+    if config.reflection.enabled {
+        if let Some(ref embedding_model) = config.reflection.embedding_model {
+            let embedding_ref = ModelRef::parse(embedding_model)
+                .context("reflection.embedding_model (expected provider_id@model_name)")?;
+            anyhow::ensure!(
+                provider_ids.contains(embedding_ref.provider_id.as_str()),
+                "reflection.embedding_model references unknown provider '{}'",
+                embedding_ref.provider_id
+            );
+            if let Some(provider) = providers_by_id.get(embedding_ref.provider_id.as_str()) {
+                anyhow::ensure!(
+                    supports_openai_embeddings(&provider.kind),
+                    "reflection.embedding_model provider '{}' uses unsupported type '{}' for embeddings; expected openai_chat or openai_responses",
+                    provider.id,
+                    provider.kind
+                );
+            }
+        } else if let Some(reflection_model) = config.reflection.as_model_config() {
+            let reflection_ref = ModelRef::parse(&reflection_model.model)
+                .context("reflection.llm_model (for default embedding provider)")?;
+            if let Some(provider) = providers_by_id.get(reflection_ref.provider_id.as_str()) {
+                anyhow::ensure!(
+                    supports_openai_embeddings(&provider.kind),
+                    "reflection.llm_model provider '{}' uses unsupported type '{}' for default embeddings; configure reflection.embedding_model with an OpenAI-compatible provider",
+                    provider.id,
+                    provider.kind
+                );
+            }
+        }
     }
 
     anyhow::ensure!(
@@ -513,6 +609,10 @@ fn validate_config(config: &Config) -> Result<()> {
     validate_mcp_servers(&config.mcp)?;
 
     Ok(())
+}
+
+fn supports_openai_embeddings(provider_type: &str) -> bool {
+    matches!(provider_type, "openai_chat" | "openai_responses")
 }
 
 fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<()> {

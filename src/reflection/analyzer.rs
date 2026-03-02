@@ -23,7 +23,7 @@ Rules:
 - Must generalize to similar tasks
 - Output ONLY the lesson text";
 
-const DEFAULT_ACON_MAX_TOKENS: u32 = 1024;
+const DEFAULT_REFLECTION_MAX_TOKENS: u32 = 1024;
 
 pub struct ReflectionAnalyzer {
     provider: Arc<dyn Provider>,
@@ -33,7 +33,7 @@ pub struct ReflectionAnalyzer {
 impl ReflectionAnalyzer {
     pub fn new(provider: Arc<dyn Provider>, mut chat_opts: ChatOptions) -> Self {
         if chat_opts.max_tokens.is_none() {
-            chat_opts.max_tokens = Some(DEFAULT_ACON_MAX_TOKENS);
+            chat_opts.max_tokens = Some(DEFAULT_REFLECTION_MAX_TOKENS);
         }
         Self {
             provider,

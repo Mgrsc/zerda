@@ -255,9 +255,11 @@ Zerda 引入了轻量外部记忆服务 [MemBurrow](https://github.com/Mgrsc/Mem
 
 对 Zerda 的直接收益是：减少历史回放造成的提示词膨胀，提升可执行约束的保留率，并在部分依赖异常时保持更稳定的记忆召回行为。
 
-### Executor 反思闭环（ACON-inspired）
+### Executor 启发式反思记忆闭环
 
-Zerda 在 Executor 路径实现的是 ACON（Agent Context Optimization）启发式反思闭环。目标是把记忆优化从“持续喂任务知识”转为“沉淀可复用的方法论与教训”（`How to act / What to avoid`）。每次执行前，系统会对委托指令做向量化检索，从 Qdrant 召回最相似的历史指南，并以精简的 `<system-reminder>` 注入到 Executor 提示词中。
+Zerda 在 Executor 路径实现的是启发式反思记忆闭环，核心思想参考了 ACON（Agent Context Optimization），但不是 ACON 的完整实现。目标是把记忆优化从“持续喂任务知识”转为“沉淀可复用的方法论与教训”（`How to act / What to avoid`）。每次执行前，系统会对委托指令做向量化检索，从 Qdrant 召回最相似的历史指南，并以精简的 `<system-reminder>` 注入到 Executor 提示词中。
+
+配置说明：反思相关配置全部放在 `[reflection]` 下（如 `llm_model`、`max_tokens`、`embedding_model`、`embedding_dim`）。`llm_model` 与 `embedding_model` 都使用 `provider_id@model_name`，其 `base_url` / `api_key` 统一从 `[providers.<id>]` 读取。`embedding_model` 可省略，默认使用 `llm_model` 的同一 provider，并使用 `text-embedding-3-small` 作为默认 embedding 模型名。反思采样参数固定为 `temperature=0.7`、`top_p=0.95`。
 
 执行过程中，系统按迭代记录工具错误和 traceback 信号。执行结束后，异步反思任务会做失败驱动对比：在同一轨迹内对照失败迭代与成功迭代，压缩出一条可迁移的操作指南。压缩提示词强约束输出为方法级经验（非领域事实）、短文本、祈使句，并要求可泛化到相似任务。
 

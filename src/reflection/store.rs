@@ -9,9 +9,9 @@ use qdrant_client::qdrant::{
 use qdrant_client::Qdrant;
 use serde::Deserialize;
 
-use super::types::Guideline;
+use super::{types::Guideline, DEFAULT_EMBEDDING_MODEL};
+use crate::config::ProviderEndpoint;
 
-const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBEDDING_DIM: u64 = 1536;
 const COLLECTION: &str = "zerda_executor_guidelines";
 const DEFAULT_EMBEDDING_BASE_URL: &str = "https://api.openai.com/v1";
@@ -37,25 +37,30 @@ struct EmbeddingData {
 }
 
 impl QdrantStore {
-    pub fn try_from_env(embedding_dim_override: Option<u64>) -> Option<Self> {
+    pub fn try_new(
+        embedding_dim_override: Option<u64>,
+        embedding_provider: &ProviderEndpoint,
+        embedding_model: &str,
+    ) -> Option<Self> {
         let qdrant_url = read_non_empty_env("QDRANT_URL")?;
-
-        let embedding_api_key = read_non_empty_env("ACON_EMBEDDING_API_KEY")
-            .or_else(|| read_non_empty_env("OPENAI_API_KEY"));
-        let embedding_api_key = match embedding_api_key {
-            Some(k) => k,
-            None => {
-                tracing::warn!(
-                    "ACON: no embedding API key available (set ACON_EMBEDDING_API_KEY or OPENAI_API_KEY)"
-                );
-                return None;
-            }
+        let embedding_api_key = embedding_provider.api_key.trim().to_string();
+        if embedding_api_key.is_empty() {
+            tracing::warn!(
+                "REFLECTION: embedding provider '{}' has empty api_key",
+                embedding_provider.id
+            );
+            return None;
+        }
+        let embedding_base_url = if embedding_provider.base_url.trim().is_empty() {
+            DEFAULT_EMBEDDING_BASE_URL.to_string()
+        } else {
+            embedding_provider.base_url.trim().to_string()
         };
-        let embedding_base_url = read_non_empty_env("ACON_EMBEDDING_BASE_URL")
-            .or_else(|| read_non_empty_env("OPENAI_BASE_URL"))
-            .unwrap_or_else(|| DEFAULT_EMBEDDING_BASE_URL.to_string());
-        let embedding_model = read_non_empty_env("ACON_EMBEDDING_MODEL")
-            .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
+        let embedding_model = if embedding_model.trim().is_empty() {
+            DEFAULT_EMBEDDING_MODEL.to_string()
+        } else {
+            embedding_model.trim().to_string()
+        };
         let embedding_dim = embedding_dim_override.unwrap_or(DEFAULT_EMBEDDING_DIM);
 
         let mut qdrant_config = QdrantConfig::from_url(&qdrant_url);
@@ -66,13 +71,14 @@ impl QdrantStore {
         let qdrant = match Qdrant::new(qdrant_config) {
             Ok(client) => client,
             Err(e) => {
-                tracing::warn!("ACON: failed to create Qdrant client: {e}");
+                tracing::warn!("REFLECTION: failed to create Qdrant client: {e}");
                 return None;
             }
         };
 
         tracing::info!(
-            "ACON: Qdrant store initialized (collection={COLLECTION}, embedding_base_url={embedding_base_url}, model={embedding_model}, dim={embedding_dim})"
+            "REFLECTION: Qdrant store initialized (collection={COLLECTION}, embedding_provider={}, embedding_base_url={embedding_base_url}, model={embedding_model}, dim={embedding_dim})",
+            embedding_provider.id
         );
 
         Some(Self {
@@ -91,7 +97,7 @@ impl QdrantStore {
             .qdrant
             .collection_exists(&self.collection)
             .await
-            .context("ACON: check collection existence")?;
+            .context("REFLECTION: check collection existence")?;
 
         if !exists {
             self.qdrant
@@ -101,8 +107,11 @@ impl QdrantStore {
                     ),
                 )
                 .await
-                .context("ACON: create collection")?;
-            tracing::info!("ACON: created Qdrant collection '{}'", self.collection);
+                .context("REFLECTION: create collection")?;
+            tracing::info!(
+                "REFLECTION: created Qdrant collection '{}'",
+                self.collection
+            );
         }
 
         Ok(())
@@ -129,24 +138,24 @@ impl QdrantStore {
             .json(&body)
             .send()
             .await
-            .context("ACON: embedding request failed")?;
+            .context("REFLECTION: embedding request failed")?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("ACON: embedding API returned {status}: {text}");
+            anyhow::bail!("REFLECTION: embedding API returned {status}: {text}");
         }
 
         let parsed: EmbeddingResponse = resp
             .json()
             .await
-            .context("ACON: parse embedding response")?;
+            .context("REFLECTION: parse embedding response")?;
         parsed
             .data
             .into_iter()
             .next()
             .map(|d| d.embedding)
-            .ok_or_else(|| anyhow::anyhow!("ACON: empty embedding response"))
+            .ok_or_else(|| anyhow::anyhow!("REFLECTION: empty embedding response"))
     }
 
     pub async fn query(&self, instruction: &str, top_k: u64) -> Result<Vec<Guideline>> {
@@ -160,7 +169,7 @@ impl QdrantStore {
                     .with_payload(true),
             )
             .await
-            .context("ACON: query points")?;
+            .context("REFLECTION: query points")?;
 
         let mut guidelines = Vec::new();
         for point in response.result {
@@ -195,7 +204,7 @@ impl QdrantStore {
             "created_at": chrono::Utc::now().to_rfc3339(),
         })
         .try_into()
-        .context("ACON: build payload")?;
+        .context("REFLECTION: build payload")?;
 
         self.qdrant
             .upsert_points(UpsertPointsBuilder::new(
@@ -203,7 +212,7 @@ impl QdrantStore {
                 vec![PointStruct::new(point_id, vector, payload)],
             ))
             .await
-            .context("ACON: upsert point")?;
+            .context("REFLECTION: upsert point")?;
 
         Ok(())
     }
@@ -217,7 +226,7 @@ impl QdrantStore {
                 }),
             )
             .await
-            .context("ACON: delete point")?;
+            .context("REFLECTION: delete point")?;
 
         Ok(())
     }

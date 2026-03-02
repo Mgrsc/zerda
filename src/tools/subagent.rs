@@ -131,12 +131,12 @@ impl Tool for SubAgentTool {
                         tips.join("\n")
                     )));
                     tracing::debug!(
-                        "ACON: injected {} guidelines into executor prompt",
+                        "REFLECTION: injected {} guidelines into executor prompt",
                         guidelines.len()
                     );
                 }
                 Err(e) => {
-                    tracing::warn!("ACON: guideline query failed: {e}");
+                    tracing::warn!("REFLECTION: guideline query failed: {e}");
                 }
                 _ => {}
             }

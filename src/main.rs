@@ -155,45 +155,84 @@ async fn main() -> Result<()> {
     let compression_provider = (fast_provider.clone(), fast_chat_opts.clone());
     let subagent_provider = (fast_provider, fast_chat_opts);
 
-    let reflection_engine = if cfg.agent.acon_enabled {
-        if let Some(ref acon_mc) = cfg.agent.acon_model {
-            match config::ModelRef::parse(&acon_mc.model) {
-                Ok(acon_ref) => match registry.get_or_create(&acon_ref.provider_id) {
-                    Ok(acon_provider) => {
-                        let acon_opts = providers::ChatOptions::from_model_config(
-                            acon_mc,
-                            &acon_ref.model_name,
-                        );
-                        match reflection::ReflectionEngine::try_from_env(
-                            acon_provider,
-                            acon_opts,
-                            cfg.agent.acon_embedding_dim,
-                        ) {
-                            Some(engine) => match engine.ensure_collection().await {
-                                Ok(()) => Some(Arc::new(engine)),
-                                Err(e) => {
-                                    tracing::warn!("ACON: collection setup failed: {e}");
-                                    None
+    let reflection_engine = if cfg.reflection.enabled {
+        if let Some(reflection_mc) = cfg.reflection.as_model_config() {
+            match config::ModelRef::parse(&reflection_mc.model) {
+                Ok(reflection_ref) => match registry.get_or_create(&reflection_ref.provider_id) {
+                    Ok(reflection_provider) => {
+                        let embedding_ref_result = match cfg.reflection.embedding_model.as_deref() {
+                            Some(model_ref) => config::ModelRef::parse(model_ref),
+                            None => Ok(config::ModelRef {
+                                provider_id: reflection_ref.provider_id.clone(),
+                                model_name: reflection::DEFAULT_EMBEDDING_MODEL.to_string(),
+                            }),
+                        };
+                        match embedding_ref_result {
+                            Ok(embedding_ref) => {
+                                let embedding_provider = cfg
+                                    .providers
+                                    .iter()
+                                    .find(|p| p.id == embedding_ref.provider_id.as_str());
+                                match embedding_provider {
+                                    Some(embedding_provider) => {
+                                        let reflection_opts =
+                                            providers::ChatOptions::from_model_config(
+                                                &reflection_mc,
+                                                &reflection_ref.model_name,
+                                            );
+                                        match reflection::ReflectionEngine::try_new(
+                                            reflection_provider,
+                                            reflection_opts,
+                                            cfg.reflection.embedding_dim,
+                                            embedding_provider,
+                                            &embedding_ref.model_name,
+                                        ) {
+                                            Some(engine) => {
+                                                match engine.ensure_collection().await {
+                                                    Ok(()) => Some(Arc::new(engine)),
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                        "REFLECTION: collection setup failed: {e}"
+                                                    );
+                                                        None
+                                                    }
+                                                }
+                                            }
+                                            None => None,
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "REFLECTION: embedding provider '{}' not found",
+                                            embedding_ref.provider_id
+                                        );
+                                        None
+                                    }
                                 }
-                            },
-                            None => None,
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "REFLECTION: invalid reflection.embedding_model reference: {e}"
+                                );
+                                None
+                            }
                         }
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "ACON: provider '{}' init failed: {e}",
-                            acon_ref.provider_id
+                            "REFLECTION: provider '{}' init failed: {e}",
+                            reflection_ref.provider_id
                         );
                         None
                     }
                 },
                 Err(e) => {
-                    tracing::warn!("ACON: invalid acon_model reference: {e}");
+                    tracing::warn!("REFLECTION: invalid reflection.llm_model reference: {e}");
                     None
                 }
             }
         } else {
-            tracing::debug!("ACON: acon_enabled=true but acon_model not configured");
+            tracing::debug!("REFLECTION: reflection.enabled=true but reflection.llm_model is empty");
             None
         }
     } else {

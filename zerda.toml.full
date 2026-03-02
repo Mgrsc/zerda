@@ -54,13 +54,15 @@ vision = true                           # whether to send images to the model (d
 # top_p = 1.0
 # max_tokens = 4096
 
-# ACON reflection system (requires Qdrant + OPENAI_API_KEY for embeddings)
-# acon_enabled = true                    # default: false
-# acon_embedding_dim = 1536              # embedding vector dimension; must match your model (e.g. bge-m3 = 1024)
-# Embedding env vars: ACON_EMBEDDING_MODEL, ACON_EMBEDDING_BASE_URL, ACON_EMBEDDING_API_KEY
-# [agent.acon_model]                     # ACON compression/analysis model; omit to disable ACON
-# model = "openai@gpt-4.1-mini"
-# max_tokens = 256
+# Reflection memory loop (heuristic, concept-inspired; requires Qdrant + OPENAI_API_KEY for embeddings)
+[reflection]
+enabled = false                         # enable executor reflection memory loop
+llm_model = "openai@gpt-4.1-mini"      # reflection analysis/compression model (provider_id@model_name)
+# max_tokens = 2048                     # optional; default: 2048
+# embedding_dim = 1536                  # embedding vector dimension; must match your model (e.g. bge-m3 = 1024)
+# embedding_model = "openai@text-embedding-3-small"  # optional; defaults to "<reflection.llm_model provider>@text-embedding-3-small"
+# Both reflection model and embedding model resolve base_url/api_key from [providers.<id>]
+# Reflection sampling is fixed: temperature=0.7, top_p=0.95
 
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported

@@ -29,6 +29,13 @@ vision = true                           # whether to send images to the model (d
 # top_p = 1.0
 # max_tokens = 4096
 
+[reflection]
+enabled = false
+# llm_model = "openai@gpt-4.1-mini"
+# max_tokens = 2048
+# embedding_dim = 1536
+# embedding_model = "openai@text-embedding-3-small"
+
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported
 # token = "${TELEGRAM_BOT_TOKEN}"
