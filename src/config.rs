@@ -351,7 +351,7 @@ const fn default_recall_top_k() -> u32 {
     8
 }
 const fn default_recall_min_score() -> f64 {
-    0.7
+    0.6
 }
 const fn default_ingest_batch_turns() -> u32 {
     3
