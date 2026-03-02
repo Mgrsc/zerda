@@ -236,13 +236,34 @@ Primitives follow a strict shared contract: `status/data/error_code/error_messag
 
 This layer decouples tool capability from task-level scripting: primitives own argument validation, timeout/retry policy, error typing, and telemetry persistence; the model focuses on orchestration and business logic. For compatibility, complex conditional constraints are enforced in runtime checks rather than pushed into top-level tool schemas.
 
-### Executor Reflection Loop (ACON)
+### Lightweight Relational-Hybrid Memory ([MemBurrow](https://github.com/Mgrsc/MemBurrow))
 
-Zerda introduces ACON (Agent Context Optimization) in the Executor path to shift memory usage from "feeding more task facts" to "feeding reusable methodology and lessons" (`How to act / What to avoid`). Before an execution run, the system embeds the delegated instruction, retrieves top-matched historical guidelines from Qdrant, and injects them into the Executor prompt as concise system reminders.
+Zerda integrates a lightweight external memory service ([MemBurrow](https://github.com/Mgrsc/MemBurrow)) to address practical failure modes in long-running agent sessions:
+
+- Repeated context replay: preserving preferences/rules by replaying long histories inflates token cost.
+- Retrieval correctness drift: vector-only recall may return semantically similar but operationally wrong memories.
+- Constraint loss: hard rules and user preferences are easy to miss in pure similarity search.
+- Recall fragility: when vector infrastructure degrades, memory injection becomes unstable.
+
+The memory pipeline mitigates these issues with several design choices:
+
+1. SQL as source of truth, vector as acceleration index.
+2. Intent-aware routing: rule/preference/constraint-style intents go SQL-first; other intents use hybrid recall.
+3. Outbox-based async ingest: API returns quickly while extraction/embedding/indexing run in background workers.
+4. Multi-factor rerank: semantic relevance, importance, confidence, freshness, and scope.
+5. Graceful degradation and repair: SQL fallback when vector search fails, plus periodic reconciliation to reduce SQL-vector drift.
+
+For Zerda, this reduces prompt bloat from history replay, improves retention of actionable constraints, and keeps recall behavior stable under partial dependency failures.
+
+### Executor Reflection Loop (ACON-inspired)
+
+Zerda implements an ACON-inspired (Agent Context Optimization) reflection loop in the Executor path. The goal is to shift memory usage from "feeding more task facts" to "feeding reusable methodology and lessons" (`How to act / What to avoid`). Before an execution run, the system embeds the delegated instruction, retrieves top-matched historical guidelines from Qdrant, and injects them into the Executor prompt as concise system reminders.
 
 During execution, Zerda records iteration outcomes (tool errors and traceback signals). After the run, a reflection worker asynchronously performs failure-driven contrast: it compares failed and successful iterations from the same trajectory, then compresses one reusable guideline in imperative form. The compression prompt explicitly enforces method-level lessons (not domain facts), short output, and generalizability to similar tasks.
 
-Distilled guidelines are written back into a vector store and become reusable priors for future similar instructions. Zerda also includes a negative-feedback guardrail: if a run still ends in failure after guideline injection, those injected guideline entries are removed to avoid reinforcing unhelpful heuristics.
+Extracted guidelines are written back into a vector store and become reusable priors for future similar instructions. Zerda also includes a negative-feedback guardrail: if a run still ends in failure after guideline injection, those injected guideline entries are removed to avoid reinforcing unhelpful heuristics.
+
+Scope note: this is not the full ACON research pipeline from the paper. Zerda currently focuses on online executor guidance memory and does not implement the paper's full offline UT/CO optimization workflow, dedicated history/observation compressor training loop, or compressor/agent distillation pipeline.
 
 ### Context Rot Resistance
 
