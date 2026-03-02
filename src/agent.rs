@@ -65,9 +65,18 @@ impl Agent {
         }
     }
 
-    pub fn set_system_prompt(&mut self, prompt: String) {
+    pub fn set_system_prompt_parts(&mut self, parts: Vec<String>) {
         self.history.retain(|m| !matches!(m.role, Role::System));
-        self.history.insert(0, ConversationMessage::system(prompt));
+        self.history.insert(
+            0,
+            ConversationMessage {
+                role: Role::System,
+                content: parts.into_iter().map(ContentPart::Text).collect(),
+                tool_calls: Vec::new(),
+                reasoning_content: None,
+                thinking_blocks: Vec::new(),
+            },
+        );
     }
 
     pub fn push_user_message(&mut self, text: String) {

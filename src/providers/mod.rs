@@ -49,16 +49,6 @@ pub struct ConversationMessage {
 }
 
 impl ConversationMessage {
-    pub fn system(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: vec![ContentPart::Text(text.into())],
-            tool_calls: Vec::new(),
-            reasoning_content: None,
-            thinking_blocks: Vec::new(),
-        }
-    }
-
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,

@@ -18,7 +18,7 @@ use crate::commands;
 use crate::config::{self, Config, ModelRef};
 use crate::identity;
 use crate::memory::{IngestBuffer, MemoryServiceClient};
-use crate::prompt::build_system_prompt;
+use crate::prompt::build_system_prompt_parts;
 use crate::providers::{self, ChatOptions, ContentPart, ProviderRegistry};
 use crate::rich_content;
 use crate::skills::{self, Skill};
@@ -54,8 +54,9 @@ pub(crate) fn refresh_prompt(
     hot: &HotState,
     channel_supplement: Option<&str>,
 ) {
-    let system_prompt = build_system_prompt(hot.identity_text.as_deref(), channel_supplement);
-    agent.set_system_prompt(system_prompt);
+    let system_prompt_parts =
+        build_system_prompt_parts(hot.identity_text.as_deref(), channel_supplement);
+    agent.set_system_prompt_parts(system_prompt_parts);
 }
 
 #[allow(clippy::too_many_arguments)]

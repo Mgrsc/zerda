@@ -232,7 +232,9 @@ async fn main() -> Result<()> {
                 }
             }
         } else {
-            tracing::debug!("REFLECTION: reflection.enabled=true but reflection.llm_model is empty");
+            tracing::debug!(
+                "REFLECTION: reflection.enabled=true but reflection.llm_model is empty"
+            );
             None
         }
     } else {
@@ -263,7 +265,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let system_prompt = prompt::build_system_prompt(identity_text.as_deref(), None);
+    let system_prompt_parts = prompt::build_system_prompt_parts(identity_text.as_deref(), None);
 
     let mut agent = agent::Agent::new(
         cfg.agent.clone(),
@@ -272,7 +274,7 @@ async fn main() -> Result<()> {
             compression_provider.1.clone(),
         ),
     );
-    agent.set_system_prompt(system_prompt);
+    agent.set_system_prompt_parts(system_prompt_parts);
 
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
