@@ -112,7 +112,8 @@ impl Tool for SubAgentTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: instruction"))?;
         let action_name = extract_action_name(instruction);
         let artifact = prepare_executor_artifacts(&action_name, instruction)?;
-        let primitives = load_primitives_runtime(&artifact, instruction, &self.disabled_primitives)?;
+        let primitives =
+            load_primitives_runtime(&artifact, instruction, &self.disabled_primitives)?;
         let user_message = build_executor_user_message(instruction, &artifact);
         let mut system_parts = build_executor_system_parts(&primitives);
 
@@ -414,7 +415,11 @@ fn extract_action_name(instruction: &str) -> String {
     let trimmed = instruction.trim();
     if let Some(paren_idx) = trimmed.find('(') {
         let action = trimmed[..paren_idx].trim();
-        if !action.is_empty() && action.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !action.is_empty()
+            && action
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
             return action.to_lowercase();
         }
     }
@@ -477,7 +482,9 @@ fn load_primitives_runtime(
         );
         let selected = select_primitives_for_instruction(&functions, instruction);
         if functions.is_empty() {
-            let msg = "### Available Code Primitives\n- unavailable: no primitive functions discovered".to_string();
+            let msg =
+                "### Available Code Primitives\n- unavailable: no primitive functions discovered"
+                    .to_string();
             (msg.clone(), msg)
         } else {
             (
@@ -576,8 +583,7 @@ fn parse_primitive_file(
         let summary = extract_section_line(&doc, "[What it does]")
             .or_else(|| first_non_empty_line(&doc))
             .unwrap_or_default();
-        let output_contract =
-            extract_contract_paths(&doc, "[Output Contract]").unwrap_or_default();
+        let output_contract = extract_contract_paths(&doc, "[Output Contract]").unwrap_or_default();
         out.push(PrimitiveFunction {
             name,
             signature,
@@ -676,7 +682,10 @@ fn render_catalog_slim(
     for f in functions {
         out.push_str(&format!("- {}", f.name));
         if !f.summary.is_empty() {
-            out.push_str(&format!(": {}", compact_inline(&f.summary, MAX_SUMMARY_CHARS)));
+            out.push_str(&format!(
+                ": {}",
+                compact_inline(&f.summary, MAX_SUMMARY_CHARS)
+            ));
         }
         out.push('\n');
     }

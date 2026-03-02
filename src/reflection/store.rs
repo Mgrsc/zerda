@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use qdrant_client::config::QdrantConfig;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, DeletePointsBuilder, Distance, PointStruct, PointsIdsList,
     QueryPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
-use qdrant_client::config::QdrantConfig;
 use serde::Deserialize;
 
 use super::types::Guideline;
@@ -96,8 +96,9 @@ impl QdrantStore {
         if !exists {
             self.qdrant
                 .create_collection(
-                    CreateCollectionBuilder::new(&self.collection)
-                        .vectors_config(VectorParamsBuilder::new(self.embedding_dim, Distance::Cosine)),
+                    CreateCollectionBuilder::new(&self.collection).vectors_config(
+                        VectorParamsBuilder::new(self.embedding_dim, Distance::Cosine),
+                    ),
                 )
                 .await
                 .context("ACON: create collection")?;
@@ -108,7 +109,10 @@ impl QdrantStore {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let url = format!("{}/embeddings", self.embedding_base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/embeddings",
+            self.embedding_base_url.trim_end_matches('/')
+        );
         let body = serde_json::json!({
             "model": self.embedding_model,
             "input": text,
@@ -118,7 +122,10 @@ impl QdrantStore {
         let resp = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.embedding_api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.embedding_api_key),
+            )
             .json(&body)
             .send()
             .await
@@ -130,7 +137,10 @@ impl QdrantStore {
             anyhow::bail!("ACON: embedding API returned {status}: {text}");
         }
 
-        let parsed: EmbeddingResponse = resp.json().await.context("ACON: parse embedding response")?;
+        let parsed: EmbeddingResponse = resp
+            .json()
+            .await
+            .context("ACON: parse embedding response")?;
         parsed
             .data
             .into_iter()
@@ -202,10 +212,9 @@ impl QdrantStore {
         let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
         self.qdrant
             .delete_points(
-                DeletePointsBuilder::new(&self.collection)
-                    .points(PointsIdsList {
-                        ids: vec![point_id],
-                    }),
+                DeletePointsBuilder::new(&self.collection).points(PointsIdsList {
+                    ids: vec![point_id],
+                }),
             )
             .await
             .context("ACON: delete point")?;

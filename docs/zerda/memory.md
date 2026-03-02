@@ -1,21 +1,16 @@
 # Memory System
 
-## Components
+## Memory Backend
 
-### MEMORY.md (Long-Term Memory)
+Zerda no longer uses local plaintext memory files (`MEMORY.md` / `user.md`) and no longer exposes a `memory` tool for manual read/append.
 
-- Location: `~/.zerda/memory/MEMORY.md`
-- Persistent across sessions
-- Max size: configurable via `max_memory_file_size` (default: 102400 bytes / ~100KB)
-- Max tokens loaded per turn: `max_memory_tokens` (default: 2000, approximately `max_memory_tokens * 4` characters)
-- Accessed by the agent via memory tool (read/append)
+Long-term memory is provided by MemBurrow via HTTP APIs:
 
-### user.md (User Context)
+- Recall: `POST /v1/memory/recall`
+- Ingest: `POST /v1/memory/ingest`
+- Feedback: `POST /v1/memory/feedback`
 
-- Location: `~/.zerda/memory/user.md`
-- Loaded each turn if the file exists
-- Injected as `<user-context>` block in user messages
-- Used for user preferences, background info, persistent metadata
+## Runtime Persistence
 
 ### Sessions
 
@@ -33,7 +28,7 @@
 
 ### Compaction Artifacts
 
-- Location: `~/.zerda/compaction/`
+- Location: `~/.zerda/memory/compaction/`
 - Full transcript snapshots saved before compression
 - Enables lossless recovery if needed
 
@@ -49,7 +44,7 @@ Use the `/compact` command in interactive mode to force compression at any time.
 
 ### How It Works
 
-1. Full transcript is persisted to `compaction/` directory
+1. Full transcript is persisted to `memory/compaction/` directory
 2. Conversation is summarized by the compression model
 3. Summary is injected as `<conversation-summary>` in subsequent messages
 4. Original messages are replaced with the summary
@@ -60,7 +55,7 @@ Each user message is assembled with these content blocks (in order):
 
 1. Skills index (available skills listing)
 2. Todo reminders (pending tasks)
-3. User context (from `user.md`)
+3. Memory recall context (from MemBurrow)
 4. Conversation summary (if compressed)
 5. Current timestamp
 6. User input (text, images, or multipart)

@@ -48,3 +48,18 @@ voice_id = "female-shaonv"
 provider = "groq"                       # groq
 api_key = "${GROQ_API_KEY}"
 model = "whisper-large-v3-turbo"
+
+# Memory service (MemBurrow; disabled by default)
+[memory_service]
+enabled = false
+url = "http://localhost:8080"
+auth_token = "${MEMBURROW_AUTH_TOKEN}"
+tenant_id = "default"
+default_entity_id = "user_default"
+process_id = "planner"
+recall_timeout_ms = 3000
+recall_top_k = 8
+recall_min_score = 0.7
+ingest_batch_turns = 3
+ingest_timeout_ms = 10000
+ingest_max_retries = 2

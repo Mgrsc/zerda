@@ -55,8 +55,7 @@ Zerda uses `~/.zerda/` as its home directory:
 ├── zerda.toml          # Main configuration
 ├── mcp.toml            # MCP server configurations (optional)
 ├── identity.md         # Agent personality definition
-├── memory/
-│   └── MEMORY.md       # Persistent long-term memory
+├── memory/             # Internal runtime artifacts (e.g. compaction snapshots)
 ├── sessions/           # Conversation history per session
 ├── skills/             # Skill definitions
 │   └── skill-name/

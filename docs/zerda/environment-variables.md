@@ -47,6 +47,12 @@
 
 When all three `CF_AI_SEARCH_*` variables are set, the `search_zerda_documents` tool becomes available, enabling semantic search over Zerda's documentation.
 
+## MemBurrow Memory Service
+
+| Variable | Description |
+|----------|-------------|
+| `MEMBURROW_AUTH_TOKEN` | Bearer token for MemBurrow API |
+
 ## Executor-Injected Variables
 
 These are automatically set in executor Python scripts:

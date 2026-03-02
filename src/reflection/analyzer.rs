@@ -61,10 +61,7 @@ impl ReflectionAnalyzer {
             .replace("{error_indices}", &error_indices.join(", "));
 
         let messages = vec![ConversationMessage::user(prompt)];
-        let response = self
-            .provider
-            .chat(&messages, &[], &self.chat_opts)
-            .await?;
+        let response = self.provider.chat(&messages, &[], &self.chat_opts).await?;
 
         let text = response
             .text

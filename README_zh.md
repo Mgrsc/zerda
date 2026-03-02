@@ -210,7 +210,7 @@ Zerda 通过 `search_zerda_documents` 工具支持对自身项目文档的语义
 
 ### KV-Cache 友好架构
 
-Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。在 Planner 主循环中，内置工具定义列表（`reload → skill → todo → tts → delegate_to_executor`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
+Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、记忆召回上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。在 Planner 主循环中，内置工具定义列表（`reload → skill → todo → tts → delegate_to_executor`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
 
 ### Planner-Executor 解耦架构
 
@@ -279,11 +279,11 @@ Zerda 不会清理失败动作（Failed Actions）和工具报错（Tool Errors�
 
 ### Segmented Content Isolation（分段式内容隔离）
 
-多来源信息混入同一文本块会导致提示词稀释（Instruction Dilution），不同语义相互污染。Zerda 将用户消息（User Message）的 `content` 字段组织为独立文本块（Text Block）数组：`[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
+多来源信息混入同一文本块会导致提示词稀释（Instruction Dilution），不同语义相互污染。Zerda 将用户消息（User Message）的 `content` 字段组织为独立文本块（Text Block）数组：`[skills_index, todo_reminder, memory_recall, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
 
 ### System/User Prompt Layering（提示词分层架构）(Experimental)
 
-提示词架构分为两层。**系统提示词（System Prompt）** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**用户提示词（User Prompt）** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，内容块（Content Block）根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<user-context>`）便于精准提取。identity 文本位于系统提示词（System Prompt）的最前位，首句锚定身份，后续所有规则围绕该身份展开。
+提示词架构分为两层。**系统提示词（System Prompt）** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**用户提示词（User Prompt）** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，内容块（Content Block）根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<memory-recall>`）便于精准提取。identity 文本位于系统提示词（System Prompt）的最前位，首句锚定身份，后续所有规则围绕该身份展开。
 
 </details>
 

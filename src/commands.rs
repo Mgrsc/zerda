@@ -80,7 +80,7 @@ pub async fn try_handle_command(
     input: &str,
     agent: &mut Agent,
     hot: &mut HotState,
-    _ctx: &RunContext<'_>,
+    _ctx: &RunContext,
 ) -> CommandResult {
     let Some((command_name, args)) = parse_command(input) else {
         return CommandResult::NotACommand;

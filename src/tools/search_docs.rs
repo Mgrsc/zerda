@@ -106,7 +106,10 @@ impl Tool for SearchDocsTool {
                 if !result.sources.is_empty() {
                     output.push_str("\n\n--- Sources ---");
                     for (i, src) in result.sources.iter().enumerate() {
-                        output.push_str(&format!("\n[{}] {} (score: {:.2})", i, src.filename, src.score));
+                        output.push_str(&format!(
+                            "\n[{}] {} (score: {:.2})",
+                            i, src.filename, src.score
+                        ));
                     }
                 }
                 Ok(ToolResult {
@@ -134,9 +137,15 @@ struct CloudflareAiSearchBackend {
 
 impl CloudflareAiSearchBackend {
     fn try_from_env() -> Option<Self> {
-        let account_id = std::env::var("CF_AI_SEARCH_ACCOUNT_ID").ok().filter(|s| !s.is_empty())?;
-        let api_token = std::env::var("CF_AI_SEARCH_API_TOKEN").ok().filter(|s| !s.is_empty())?;
-        let instance_name = std::env::var("CF_AI_SEARCH_INSTANCE_NAME").ok().filter(|s| !s.is_empty())?;
+        let account_id = std::env::var("CF_AI_SEARCH_ACCOUNT_ID")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let api_token = std::env::var("CF_AI_SEARCH_API_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let instance_name = std::env::var("CF_AI_SEARCH_INSTANCE_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())?;
 
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)

@@ -33,11 +33,9 @@ base_url = ""                           # API root up to version path, e.g. http
 max_iterations = 10                     # maximum tool calls per turn
 max_history = 30                        # trigger compression when non-system messages exceed this value
 max_tool_output_chars = 30000           # truncate tool output above this threshold
-max_memory_tokens = 2000                # maximum token count for memory tool content
 identity_path = "~/.zerda/identity.md"  # default path to the system prompt file
 show_usage = false                      # print token usage at the end of each turn
 # max_budget_tokens = 1000000           # session token budget; stop when exceeded (optional, unlimited by default)
-max_memory_file_size = 102400           # maximum memory file size in bytes
 session_cleanup_days = 7                # auto-clean sessions older than N days
 tool_timeout = 300                      # tool execution timeout in seconds
 disabled_primitives = []                # blacklist primitive names; all primitives are enabled when empty
@@ -82,6 +80,21 @@ model = "speech-2.8-hd"
 provider = ""                           # default: disabled
 # api_key = "${GROQ_API_KEY}"
 model = "whisper-large-v3-turbo"
+
+# Memory service (MemBurrow; disabled by default)
+[memory_service]
+enabled = false                         # set true to enable MemBurrow integration
+url = "http://localhost:8080"           # MemBurrow base URL (without trailing /)
+auth_token = "${MEMBURROW_AUTH_TOKEN}"  # Bearer token used by Authorization header
+tenant_id = "default"                   # must match X-Tenant-ID header and request body
+default_entity_id = "user_default"      # fallback entity_id when channel/user id is unavailable
+process_id = "planner"                  # memory namespace segment (e.g. planner / __shared__)
+recall_timeout_ms = 3000                # timeout for /v1/memory/recall requests
+recall_top_k = 8                        # max recall items requested per turn
+recall_min_score = 0.7                  # items below this score are filtered before LLM injection
+ingest_batch_turns = 3                  # flush ingest every N turns; set 1 for per-turn ingest
+ingest_timeout_ms = 10000               # timeout for /v1/memory/ingest and /feedback
+ingest_max_retries = 2                  # retry count for 5xx ingest/feedback errors
 
 [log]
 level = "info"                          # trace | debug | info | warn | error

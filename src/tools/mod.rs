@@ -6,7 +6,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::memory::Memory;
 use crate::providers::ToolSpec;
 use crate::reflection::ReflectionEngine;
 use crate::skills::Skill;
@@ -54,14 +53,12 @@ use crate::providers::{ChatOptions, Provider};
 
 pub struct BuiltinToolsRuntime {
     pub tool_timeout: u64,
-    pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
     pub disabled_primitives: Vec<String>,
 }
 
 pub struct BuiltinToolsDependencies {
-    pub memory: Arc<Memory>,
     pub tts_provider: Option<Arc<dyn TtsProvider>>,
     pub skills: Arc<RwLock<Vec<Skill>>>,
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
@@ -71,8 +68,6 @@ pub struct BuiltinToolsDependencies {
 
 pub struct BuiltinToolsContext {
     pub tool_timeout: u64,
-    pub memory: Arc<Memory>,
-    pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
     pub disabled_primitives: Vec<String>,
@@ -87,8 +82,6 @@ impl BuiltinToolsContext {
     pub fn new(runtime: BuiltinToolsRuntime, dependencies: BuiltinToolsDependencies) -> Self {
         Self {
             tool_timeout: runtime.tool_timeout,
-            memory: dependencies.memory,
-            max_memory_chars: runtime.max_memory_chars,
             config_path: runtime.config_path,
             reload_signal: runtime.reload_signal,
             disabled_primitives: runtime.disabled_primitives,
@@ -110,8 +103,6 @@ impl From<(BuiltinToolsRuntime, BuiltinToolsDependencies)> for BuiltinToolsConte
 pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::TodoHandle) {
     let BuiltinToolsContext {
         tool_timeout,
-        memory: _memory,
-        max_memory_chars: _max_memory_chars,
         config_path,
         reload_signal,
         disabled_primitives,

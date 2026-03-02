@@ -27,6 +27,7 @@ pub struct ExecutePythonScriptTool {
 }
 
 impl ExecutePythonScriptTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         script_path: PathBuf,
         log_path: PathBuf,
@@ -272,9 +273,9 @@ impl Tool for ExecutePythonScriptTool {
 fn build_bootstrapped_code(
     user_code: &str,
     bootstrap_path: Option<&PathBuf>,
-    out_path: &PathBuf,
-    log_path: &PathBuf,
-    telemetry_path: &PathBuf,
+    out_path: &std::path::Path,
+    log_path: &std::path::Path,
+    telemetry_path: &std::path::Path,
 ) -> String {
     let mut lines = Vec::new();
     lines.push("import os".to_string());

@@ -31,11 +31,7 @@ impl ReflectionEngine {
         self.store.ensure_collection().await
     }
 
-    pub async fn query_guidelines(
-        &self,
-        instruction: &str,
-        top_k: u64,
-    ) -> Result<Vec<Guideline>> {
+    pub async fn query_guidelines(&self, instruction: &str, top_k: u64) -> Result<Vec<Guideline>> {
         self.store.query(instruction, top_k).await
     }
 

@@ -46,8 +46,6 @@ fast_model = { name = "openai@gpt-4o-mini" }
 max_iterations = 10           # Max tool calls per turn (default: 10, min: 10)
 max_history = 30              # Message count before auto-compression (default: 30)
 max_tool_output_chars = 30000 # Truncate tool results exceeding this (default: 30000)
-max_memory_tokens = 2000      # Max tokens for memory content (default: 2000)
-max_memory_file_size = 102400 # MEMORY.md max size in bytes (default: 102400)
 tool_timeout = 300            # Tool execution timeout in seconds (default: 300)
 disabled_primitives = []      # Primitive blacklist; all enabled when empty
 session_cleanup_days = 7      # Auto-clean sessions older than N days (default: 7)
@@ -113,6 +111,28 @@ model = "whisper-large-v3-turbo" # Default: "whisper-large-v3-turbo"
 ```
 
 Used for Telegram voice message transcription.
+
+## Memory Service (MemBurrow)
+
+```toml
+[memory_service]
+enabled = true
+url = "http://localhost:8080"
+auth_token = "${MEMBURROW_AUTH_TOKEN}"
+tenant_id = "default"
+default_entity_id = "user_default"
+process_id = "planner"
+recall_timeout_ms = 3000
+recall_top_k = 8
+recall_min_score = 0.7
+ingest_batch_turns = 3
+ingest_timeout_ms = 10000
+ingest_max_retries = 2
+```
+
+- `recall_min_score`: Memories below this score are excluded from LLM context injection.
+- `ingest_batch_turns`: Batch multiple turns before one ingest request; set to `1` for strict per-turn idempotency.
+- Memory API uses `Authorization: Bearer <auth_token>` and `X-Tenant-ID: <tenant_id>`.
 
 ## Logging
 

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use super::{
     apply_sampling_mode, build_openai_content_parts, extract_model_ids, initial_sampling_mode,
     is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
-    ChatOptions, ContentPart, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
-    StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    ChatOptions, ContentPart, ConversationMessage, HttpClient, Provider, ProviderResponse, Role,
+    SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderEndpoint;
 

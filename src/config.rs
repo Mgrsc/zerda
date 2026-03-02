@@ -26,6 +26,8 @@ pub struct Config {
     pub stt: SttConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub memory_service: MemoryServiceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,16 +116,12 @@ pub struct AgentConfig {
     pub max_history: usize,
     #[serde(default = "default_max_tool_output_chars")]
     pub max_tool_output_chars: usize,
-    #[serde(default = "default_max_memory_tokens")]
-    pub max_memory_tokens: usize,
     #[serde(default = "default_identity_path")]
     pub identity_path: String,
     #[serde(default)]
     pub show_usage: bool,
     #[serde(default)]
     pub max_budget_tokens: Option<u64>,
-    #[serde(default = "default_max_memory_file_size")]
-    pub max_memory_file_size: u64,
     #[serde(default = "default_session_cleanup_days")]
     pub session_cleanup_days: u64,
     #[serde(default = "default_tool_timeout")]
@@ -149,14 +147,8 @@ const fn default_max_history() -> usize {
 const fn default_max_tool_output_chars() -> usize {
     30000
 }
-const fn default_max_memory_tokens() -> usize {
-    2000
-}
 fn default_identity_path() -> String {
     "~/.zerda/identity.md".to_string()
-}
-const fn default_max_memory_file_size() -> u64 {
-    102_400
 }
 const fn default_session_cleanup_days() -> u64 {
     7
@@ -249,6 +241,84 @@ pub struct LogConfig {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryServiceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_memory_service_url")]
+    pub url: String,
+    #[serde(default)]
+    pub auth_token: String,
+    #[serde(default = "default_memory_tenant_id")]
+    pub tenant_id: String,
+    #[serde(default = "default_memory_entity_id")]
+    pub default_entity_id: String,
+    #[serde(default = "default_memory_process_id")]
+    pub process_id: String,
+    #[serde(default = "default_recall_timeout_ms")]
+    pub recall_timeout_ms: u64,
+    #[serde(default = "default_recall_top_k")]
+    pub recall_top_k: u32,
+    #[serde(default = "default_recall_min_score")]
+    pub recall_min_score: f64,
+    #[serde(default = "default_ingest_batch_turns")]
+    pub ingest_batch_turns: u32,
+    #[serde(default = "default_ingest_timeout_ms")]
+    pub ingest_timeout_ms: u64,
+    #[serde(default = "default_ingest_max_retries")]
+    pub ingest_max_retries: u32,
+}
+
+impl Default for MemoryServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_memory_service_url(),
+            auth_token: String::new(),
+            tenant_id: default_memory_tenant_id(),
+            default_entity_id: default_memory_entity_id(),
+            process_id: default_memory_process_id(),
+            recall_timeout_ms: default_recall_timeout_ms(),
+            recall_top_k: default_recall_top_k(),
+            recall_min_score: default_recall_min_score(),
+            ingest_batch_turns: default_ingest_batch_turns(),
+            ingest_timeout_ms: default_ingest_timeout_ms(),
+            ingest_max_retries: default_ingest_max_retries(),
+        }
+    }
+}
+
+fn default_memory_service_url() -> String {
+    "http://localhost:8080".to_string()
+}
+fn default_memory_tenant_id() -> String {
+    "default".to_string()
+}
+fn default_memory_entity_id() -> String {
+    "user_default".to_string()
+}
+fn default_memory_process_id() -> String {
+    "planner".to_string()
+}
+const fn default_recall_timeout_ms() -> u64 {
+    3000
+}
+const fn default_recall_top_k() -> u32 {
+    8
+}
+const fn default_recall_min_score() -> f64 {
+    0.7
+}
+const fn default_ingest_batch_turns() -> u32 {
+    3
+}
+const fn default_ingest_timeout_ms() -> u64 {
+    10000
+}
+const fn default_ingest_max_retries() -> u32 {
+    2
 }
 
 fn substitute_env_vars(input: &str) -> String {

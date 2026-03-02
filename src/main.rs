@@ -135,13 +135,7 @@ async fn main() -> Result<()> {
     let fast_provider = registry.get_or_create(&fast_ref.provider_id)?;
     let fast_chat_opts = providers::ChatOptions::from_model_config(fast_mc, &fast_ref.model_name);
 
-    let memory_dir = config::resolve_path(config::MEMORY_DIR);
-    let mem = Arc::new(memory::Memory::new(memory_dir.join("memory")));
-    mem.ensure_dirs()?;
-    mem.check_memory_size(cfg.agent.max_memory_file_size);
-
     let reload_signal = tools::reload::ReloadSignal::default();
-    let max_memory_chars = cfg.agent.max_memory_tokens * 4;
 
     let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
     let skills_list = skills::load_skills(&skills_dir);
@@ -164,34 +158,35 @@ async fn main() -> Result<()> {
     let reflection_engine = if cfg.agent.acon_enabled {
         if let Some(ref acon_mc) = cfg.agent.acon_model {
             match config::ModelRef::parse(&acon_mc.model) {
-                Ok(acon_ref) => {
-                    match registry.get_or_create(&acon_ref.provider_id) {
-                        Ok(acon_provider) => {
-                            let acon_opts = providers::ChatOptions::from_model_config(
-                                acon_mc,
-                                &acon_ref.model_name,
-                            );
-                            match reflection::ReflectionEngine::try_from_env(
-                                acon_provider,
-                                acon_opts,
-                                cfg.agent.acon_embedding_dim,
-                            ) {
-                                Some(engine) => match engine.ensure_collection().await {
-                                    Ok(()) => Some(Arc::new(engine)),
-                                    Err(e) => {
-                                        tracing::warn!("ACON: collection setup failed: {e}");
-                                        None
-                                    }
-                                },
-                                None => None,
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("ACON: provider '{}' init failed: {e}", acon_ref.provider_id);
-                            None
+                Ok(acon_ref) => match registry.get_or_create(&acon_ref.provider_id) {
+                    Ok(acon_provider) => {
+                        let acon_opts = providers::ChatOptions::from_model_config(
+                            acon_mc,
+                            &acon_ref.model_name,
+                        );
+                        match reflection::ReflectionEngine::try_from_env(
+                            acon_provider,
+                            acon_opts,
+                            cfg.agent.acon_embedding_dim,
+                        ) {
+                            Some(engine) => match engine.ensure_collection().await {
+                                Ok(()) => Some(Arc::new(engine)),
+                                Err(e) => {
+                                    tracing::warn!("ACON: collection setup failed: {e}");
+                                    None
+                                }
+                            },
+                            None => None,
                         }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            "ACON: provider '{}' init failed: {e}",
+                            acon_ref.provider_id
+                        );
+                        None
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("ACON: invalid acon_model reference: {e}");
                     None
@@ -207,13 +202,11 @@ async fn main() -> Result<()> {
 
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
-        max_memory_chars,
         config_path: cli.config.clone(),
         reload_signal: reload_signal.clone(),
         disabled_primitives: cfg.agent.disabled_primitives.clone(),
     };
     let tools_dependencies = tools::BuiltinToolsDependencies {
-        memory: Arc::clone(&mem),
         tts_provider,
         skills: Arc::clone(&shared_skills),
         skill_cache: Arc::clone(&skill_cache),
@@ -244,11 +237,30 @@ async fn main() -> Result<()> {
 
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
+    let memory_client = if cfg.memory_service.enabled {
+        match memory::MemoryServiceClient::new(&cfg.memory_service) {
+            Ok(client) => {
+                tracing::info!(
+                    url = %cfg.memory_service.url,
+                    tenant_id = %cfg.memory_service.tenant_id,
+                    "Memory service client initialized"
+                );
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize memory service client: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let run_ctx = runner::RunContext {
-        mem: &mem,
         config_path: cli.config.clone(),
         reload_signal,
         stt_provider,
+        memory_client,
     };
 
     let mut hot = runner::HotState {
@@ -277,11 +289,48 @@ async fn main() -> Result<()> {
             }
 
             if let Some(msg) = message {
-                runner::prepare_user_turn(&mut agent, &hot, mem.as_ref(), msg, None, None);
+                let raw_msg = msg.clone();
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                let recall_item_ids = runner::prepare_user_turn(
+                    &mut agent,
+                    &hot,
+                    msg,
+                    None,
+                    None,
+                    run_ctx.memory_client.as_ref(),
+                    None,
+                )
+                .await;
                 let response = agent
                     .run_turn(hot.active_provider.as_ref(), &hot.tools, &hot.chat_opts)
                     .await?;
                 println!("{}", channels::cli::sanitize_terminal_text(&response));
+                if let Some(client) = run_ctx.memory_client.as_ref() {
+                    let messages = vec![
+                        memory::IngestMessage {
+                            role: "user".to_string(),
+                            content: raw_msg,
+                        },
+                        memory::IngestMessage {
+                            role: "assistant".to_string(),
+                            content: response.clone(),
+                        },
+                    ];
+                    if let Err(e) = client
+                        .ingest(messages, None, None, Some(&turn_id), Some("cli"))
+                        .await
+                    {
+                        tracing::warn!("Memory ingest failed for run command: {e}");
+                    }
+                    if !recall_item_ids.is_empty() {
+                        if let Err(e) = client
+                            .feedback(&recall_item_ids, None, Some(&turn_id))
+                            .await
+                        {
+                            tracing::warn!("Memory feedback failed for run command: {e}");
+                        }
+                    }
+                }
                 if let Err(e) = agent.save_session(&sessions_dir, None) {
                     tracing::warn!("Failed to save session: {e}");
                 }
