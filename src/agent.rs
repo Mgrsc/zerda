@@ -408,7 +408,10 @@ impl Agent {
                         id
                     };
                     last_tool_call_id = Some(resolved_id.clone());
-                    tool_args.entry(resolved_id).or_default().push_str(&args_chunk);
+                    tool_args
+                        .entry(resolved_id)
+                        .or_default()
+                        .push_str(&args_chunk);
                 }
                 StreamEvent::AssistantMeta(meta) => {
                     let kind = meta.get("kind").and_then(serde_json::Value::as_str);

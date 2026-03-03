@@ -918,6 +918,21 @@ pub async fn run_serve(
         };
         let captured_messages = tool_phase_buffer.as_ref().map(Arc::clone);
         let tool_phase_tx_for_cb = tool_phase_tx.clone();
+        let mut live_stream_handle = None;
+        let live_stream_tx = if let Some(ref ch_ref) = ch {
+            let (tx, rx) = mpsc::unbounded_channel::<LiveStreamEvent>();
+            let ch = Arc::clone(ch_ref);
+            let sender = sender.clone();
+            let span = turn_span.clone();
+            live_stream_handle = Some(tokio::spawn(
+                async move { dispatch_live_stream(ch, sender, rx).await }.instrument(span),
+            ));
+            Some(tx)
+        } else {
+            None
+        };
+        let live_stream_tx_for_delta = live_stream_tx.clone();
+        let live_stream_tx_for_cb = live_stream_tx.clone();
         let mut cancelled = queued_cancel;
         let mut rx_closed = false;
         let mut response = String::new();
@@ -927,9 +942,16 @@ pub async fn run_serve(
                     hot.active_provider.as_ref(),
                     &hot.tools,
                     &hot.chat_opts,
-                    |_| {},
+                    move |delta| {
+                        if let Some(tx) = &live_stream_tx_for_delta {
+                            let _ = tx.send(LiveStreamEvent::Delta(delta.to_string()));
+                        }
+                    },
                     move |text, has_tool_calls| {
                         if has_tool_calls {
+                            if let Some(tx) = &live_stream_tx_for_cb {
+                                let _ = tx.send(LiveStreamEvent::Reset);
+                            }
                             if let Some(message) = normalize_tool_phase_message(text) {
                                 let chars = message.chars().count();
                                 tracing::debug!(chars, "Captured tool-phase assistant content");
@@ -991,11 +1013,23 @@ pub async fn run_serve(
 
         typing_cancel.cancel();
         drop(tool_phase_tx);
+        drop(live_stream_tx);
         if let Some(handle) = tool_phase_handle {
             if let Err(e) = handle.await {
                 tracing::warn!("Tool-phase sender task panicked: {e}");
             }
         }
+        let live_stream_summary = if let Some(handle) = live_stream_handle {
+            match handle.await {
+                Ok(summary) => summary,
+                Err(e) => {
+                    tracing::warn!("Live stream sender task panicked: {e}");
+                    LiveStreamDispatchSummary::default()
+                }
+            }
+        } else {
+            LiveStreamDispatchSummary::default()
+        };
 
         if cancelled {
             session_agent.restore_turn(snapshot);
@@ -1036,7 +1070,14 @@ pub async fn run_serve(
                 "Sending assistant messages"
             );
             if let Some(final_message) = normalize_final_message(&response) {
-                if let Err(e) = send_final_message_streamed(ch, &sender, &final_message).await {
+                if let Err(e) = send_final_message(
+                    ch,
+                    &sender,
+                    &final_message,
+                    live_stream_summary.stream_message_id.as_deref(),
+                )
+                .await
+                {
                     tracing::warn!("Failed to send response via {}: {e}", channel_name);
                 }
             }
@@ -1171,28 +1212,102 @@ fn normalize_final_message(raw: &str) -> Option<String> {
     }
 }
 
-fn build_stream_prefixes(text: &str, step_chars: usize) -> Vec<String> {
-    let step = step_chars.max(1);
-    let mut prefixes = Vec::new();
-    let mut acc = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        acc.push(ch);
-        count += 1;
-        if count.is_multiple_of(step) {
-            prefixes.push(acc.clone());
-        }
-    }
-    if prefixes.last() != Some(&acc) {
-        prefixes.push(acc);
-    }
-    prefixes
+enum LiveStreamEvent {
+    Delta(String),
+    Reset,
 }
 
-async fn send_final_message_streamed(
+#[derive(Default)]
+struct LiveStreamDispatchSummary {
+    stream_message_id: Option<String>,
+    overflowed: bool,
+}
+
+fn apply_live_stream_event(
+    event: LiveStreamEvent,
+    stream_text: &mut String,
+    overflowed: &mut bool,
+) {
+    match event {
+        LiveStreamEvent::Delta(delta) => stream_text.push_str(&delta),
+        LiveStreamEvent::Reset => {
+            stream_text.clear();
+            *overflowed = false;
+        }
+    }
+}
+
+async fn dispatch_live_stream(
+    channel: Arc<dyn Channel>,
+    recipient: String,
+    mut rx: mpsc::UnboundedReceiver<LiveStreamEvent>,
+) -> LiveStreamDispatchSummary {
+    let mut summary = LiveStreamDispatchSummary::default();
+    let mut stream_text = String::new();
+    let mut disabled = false;
+
+    while let Some(event) = rx.recv().await {
+        apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+        while let Ok(event) = rx.try_recv() {
+            apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+        }
+
+        if disabled {
+            continue;
+        }
+
+        let clean_text = rich_content::strip_rich_markers(&stream_text);
+        if clean_text.is_empty() {
+            continue;
+        }
+        let clean_chars = clean_text.chars().count();
+        if clean_chars > config::STREAM_OVERFLOW_CHARS {
+            if !summary.overflowed {
+                tracing::debug!(
+                    clean_chars,
+                    max_chars = config::STREAM_OVERFLOW_CHARS,
+                    "Live stream overflow reached; skip intermediate updates"
+                );
+            }
+            summary.overflowed = true;
+            continue;
+        }
+
+        let update = format!("{clean_text}▌");
+        if let Some(message_id) = summary.stream_message_id.clone() {
+            if let Err(e) = channel
+                .send_stream_update(&recipient, &message_id, &update)
+                .await
+            {
+                tracing::warn!("Failed to send live stream update: {e}");
+                summary.stream_message_id = None;
+                disabled = true;
+            }
+            continue;
+        }
+
+        match channel.send_stream_start(&recipient, &update).await {
+            Ok(Some(message_id)) => {
+                summary.stream_message_id = Some(message_id);
+            }
+            Ok(None) => {
+                disabled = true;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start live stream: {e}");
+                disabled = true;
+            }
+        }
+    }
+
+    summary
+}
+
+async fn send_final_message(
     channel: &Arc<dyn Channel>,
     recipient: &str,
     message: &str,
+    stream_message_id: Option<&str>,
 ) -> Result<()> {
     let clean_text = rich_content::strip_rich_markers(message);
     let markers = rich_content::rich_content_markers(message);
@@ -1204,29 +1319,16 @@ async fn send_final_message_streamed(
         return Ok(());
     }
 
-    if clean_text.chars().count() > config::STREAM_OVERFLOW_CHARS {
-        channel.send(&clean_text, recipient).await?;
-    } else {
-        let prefixes = build_stream_prefixes(&clean_text, 80);
-        let mut fallback_plain = true;
-        if let Some(first) = prefixes.first() {
-            let start_text = format!("{first}▌");
-            if let Some(message_id) = channel.send_stream_start(recipient, &start_text).await? {
-                fallback_plain = false;
-                for prefix in prefixes.iter().skip(1) {
-                    let update = format!("{prefix}▌");
-                    channel
-                        .send_stream_update(recipient, &message_id, &update)
-                        .await?;
-                }
-                channel
-                    .send_stream_update(recipient, &message_id, &clean_text)
-                    .await?;
-            }
-        }
-        if fallback_plain {
+    if let Some(message_id) = stream_message_id {
+        if let Err(e) = channel
+            .send_stream_update(recipient, message_id, &clean_text)
+            .await
+        {
+            tracing::warn!("Failed to finalize stream update, falling back to send: {e}");
             channel.send(&clean_text, recipient).await?;
         }
+    } else {
+        channel.send(&clean_text, recipient).await?;
     }
 
     for marker in markers {

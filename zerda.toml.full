@@ -69,6 +69,7 @@ llm_model = "openai@gpt-4.1-mini"      # reflection analysis/compression model (
 # token = "${TELEGRAM_BOT_TOKEN}"
 # allowed_users = []                    # default: empty means all users
 # max_message_length = 4096
+# draft_stream_update_interval_ms = 350
 
 # TTS (optional; disabled when provider is empty)
 [tts]

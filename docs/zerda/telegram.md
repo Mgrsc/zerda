@@ -8,6 +8,7 @@ name = "telegram"
 token = "${TELEGRAM_BOT_TOKEN}"
 allowed_users = ["*"]           # ["*"] = all users, or list specific user IDs
 max_message_length = 4096       # Default: 4096
+draft_stream_update_interval_ms = 350  # Default: 350 (sendMessageDraft update interval)
 ```
 
 ## Starting the Bot
@@ -27,7 +28,7 @@ This starts the Telegram bot listener and runs indefinitely.
 - MarkdownV2 formatted responses
 - Automatic message splitting for long responses (respects code blocks and links)
 - Typing indicators during processing
-- Streaming message updates
+- Streaming drafts in private chats (and private chat topics), with non-stream fallback in groups
 
 ## Access Control
 
