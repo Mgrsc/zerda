@@ -44,14 +44,10 @@ Each executor job produces:
 }
 ```
 
-## Delegation Brief Format
+## Delegation Instruction Format
 
 When the Planner delegates to the Executor, it provides:
-- **GOAL**: What needs to be accomplished
-- **INPUT**: Data and context
-- **CONSTRAINTS**: Limitations and requirements
-- **DONE_WHEN**: Completion criteria
-- **RETURN**: What to return
+- **instruction**: Structured instruction in the form `ACTION(param=value, ...) -> {return_fields}`
 
 ## Benefits
 

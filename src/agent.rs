@@ -515,7 +515,7 @@ impl Agent {
                     self.temp_files.push(path.clone());
                     format!(
                         "[Tool output too large ({len} chars), saved to {path}. \
-                         Use `delegate_to_executor` and pass this file path in the brief for deep processing.]",
+                         Use `delegate_to_executor` and pass this file path in the instruction for deep processing.]",
                         path = path.display()
                     )
                 }
@@ -646,7 +646,7 @@ impl Agent {
 
         let compaction_hint = format!(
             "\n\nThe full conversation transcript before compaction was saved to: {path}\n\
-             To retrieve specific details, use `delegate_to_executor` and include this file path in the brief. Do NOT inline the entire file in planner context.",
+             To retrieve specific details, use `delegate_to_executor` and include this file path in the instruction. Do NOT inline the entire file in planner context.",
             path = compaction_path.display()
         );
 

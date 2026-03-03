@@ -43,8 +43,7 @@ Convert text to speech audio. Available only when TTS provider is configured.
 
 Delegate mechanical work to the Executor agent. Available when subagent provider is configured.
 
-- `brief`: Goal-oriented delegation brief (GOAL, INPUT, CONSTRAINTS, DONE_WHEN, RETURN)
-- `task_name`: Optional short name for artifact directory
+- `instruction`: Structured instruction (required), format: `ACTION(param=value, ...) -> {return_fields}`
 
 ### `search_zerda_documents`
 
