@@ -359,6 +359,7 @@ impl Agent {
         let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
         let mut tool_starts: Vec<(String, String, Option<serde_json::Value>)> = Vec::new();
         let mut tool_args: HashMap<String, String> = HashMap::new();
+        let mut last_tool_call_id: Option<String> = None;
         let mut usage = Usage::default();
 
         while let Some(event) = stream.next().await {
@@ -372,11 +373,42 @@ impl Agent {
                     name,
                     extra_content,
                 } => {
-                    tool_starts.push((id.clone(), name, extra_content));
-                    tool_args.entry(id).or_default();
+                    let resolved_id = if id.trim().is_empty() {
+                        let generated_id = format!("tool_call_auto_{}", tool_starts.len());
+                        tracing::warn!(
+                            generated_id = %generated_id,
+                            "ToolCallStart event missing id; generated fallback id"
+                        );
+                        generated_id
+                    } else {
+                        id
+                    };
+                    last_tool_call_id = Some(resolved_id.clone());
+                    tool_starts.push((resolved_id.clone(), name, extra_content));
+                    tool_args.entry(resolved_id).or_default();
                 }
                 StreamEvent::ToolCallDelta { id, args_chunk } => {
-                    tool_args.entry(id).or_default().push_str(&args_chunk);
+                    let resolved_id = if id.trim().is_empty() {
+                        match last_tool_call_id.clone() {
+                            Some(last_id) => {
+                                tracing::debug!(
+                                    fallback_tool_call_id = %last_id,
+                                    "ToolCallDelta event missing id; falling back to last started tool call id"
+                                );
+                                last_id
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "ToolCallDelta event missing id and no previous tool call id is available; dropping args chunk"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        id
+                    };
+                    last_tool_call_id = Some(resolved_id.clone());
+                    tool_args.entry(resolved_id).or_default().push_str(&args_chunk);
                 }
                 StreamEvent::AssistantMeta(meta) => {
                     let kind = meta.get("kind").and_then(serde_json::Value::as_str);
