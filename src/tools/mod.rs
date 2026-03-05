@@ -64,6 +64,7 @@ pub struct BuiltinToolsDependencies {
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
     pub reflection: Option<Arc<ReflectionEngine>>,
+    pub docs_search: Option<search_docs::SearchDocsSettings>,
 }
 
 pub struct BuiltinToolsContext {
@@ -76,6 +77,7 @@ pub struct BuiltinToolsContext {
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
     pub reflection: Option<Arc<ReflectionEngine>>,
+    pub docs_search: Option<search_docs::SearchDocsSettings>,
 }
 
 impl BuiltinToolsContext {
@@ -90,6 +92,7 @@ impl BuiltinToolsContext {
             skill_cache: dependencies.skill_cache,
             subagent_provider: dependencies.subagent_provider,
             reflection: dependencies.reflection,
+            docs_search: dependencies.docs_search,
         }
     }
 }
@@ -111,6 +114,7 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
         skill_cache,
         subagent_provider,
         reflection,
+        docs_search,
     } = ctx;
 
     let (todo_tool, todo_handle) = todo::TodoTool::new();
@@ -131,8 +135,10 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
             disabled_primitives,
         )));
     }
-    if let Some(tool) = search_docs::SearchDocsTool::try_from_env() {
-        tools.push(Box::new(tool));
+    if let Some(settings) = docs_search {
+        if let Some(tool) = search_docs::SearchDocsTool::try_new(settings) {
+            tools.push(Box::new(tool));
+        }
     }
     (tools, todo_handle)
 }

@@ -241,6 +241,57 @@ async fn main() -> Result<()> {
         None
     };
 
+    let docs_search_settings = if cfg.docs_search.enabled {
+        match config::ModelRef::parse(&cfg.docs_search.embedding_model) {
+            Ok(model_ref) => {
+                match cfg
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == model_ref.provider_id)
+                {
+                    Some(provider) => {
+                        if provider.api_key.trim().is_empty() {
+                            tracing::warn!(
+                                "search_zerda_documents: embedding provider '{}' api_key is empty, tool disabled",
+                                provider.id
+                            );
+                            None
+                        } else {
+                            Some(tools::search_docs::SearchDocsSettings {
+                                qdrant_url: cfg.docs_search.qdrant_url.trim().to_string(),
+                                qdrant_api_key: if cfg.docs_search.qdrant_api_key.trim().is_empty()
+                                {
+                                    None
+                                } else {
+                                    Some(cfg.docs_search.qdrant_api_key.trim().to_string())
+                                },
+                                collection: cfg.docs_search.collection.trim().to_string(),
+                                docs_root: config::resolve_path(&cfg.docs_search.docs_dir),
+                                embedding_api_key: provider.api_key.trim().to_string(),
+                                embedding_base_url: provider.base_url.trim().to_string(),
+                                embedding_model: model_ref.model_name,
+                                embedding_dim: cfg.docs_search.embedding_dim,
+                            })
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "search_zerda_documents: embedding provider '{}' not found, tool disabled",
+                            model_ref.provider_id
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("search_zerda_documents: invalid docs_search.embedding_model: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
         config_path: cli.config.clone(),
@@ -253,6 +304,7 @@ async fn main() -> Result<()> {
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
         reflection: reflection_engine,
+        docs_search: docs_search_settings,
     };
     let (all_tools, todo_handle) = tools::builtin_tools((tools_runtime, tools_dependencies).into());
 

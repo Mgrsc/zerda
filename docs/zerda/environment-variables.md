@@ -37,15 +37,12 @@
 | `FIRECRAWL_API_KEY` | Firecrawl API key for web scraping |
 | `FIRECRAWL_BASE_URL` | Firecrawl API base URL (default: https://api.firecrawl.dev) |
 
-## Document Search (Cloudflare AI Search)
+## Document Search (Qdrant)
 
-| Variable | Description |
-|----------|-------------|
-| `CF_AI_SEARCH_ACCOUNT_ID` | Cloudflare account ID |
-| `CF_AI_SEARCH_API_TOKEN` | Cloudflare API token with AI Search permissions |
-| `CF_AI_SEARCH_INSTANCE_NAME` | Cloudflare AutoRAG instance name |
+Document search is configured in `zerda.toml` under `[docs_search]`.
 
-When all three `CF_AI_SEARCH_*` variables are set, the `search_zerda_documents` tool becomes available, enabling semantic search over Zerda's documentation.
+- `qdrant_url`, `qdrant_api_key`, `collection`, `docs_dir`, `embedding_model`, and `embedding_dim` are TOML fields.
+- Embedding provider credentials come from `[providers.<id>]` referenced by `docs_search.embedding_model`.
 
 ## MemBurrow Memory Service
 

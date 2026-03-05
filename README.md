@@ -186,21 +186,27 @@ args = ["-y", "@scope/server"]
 
 Zerda supports semantic search over its own project documentation via the `search_zerda_documents` tool, enabling the Agent to look up configuration guides, command references, and architectural details on demand.
 
-**Currently supported backend: [Cloudflare AutoRAG (AI Search)](https://developers.cloudflare.com/autorag/)**
+**Backend: Qdrant (local/shared vector store)**
 
 Setup:
 
-1. Upload the documentation files from `docs/zerda/` to a Cloudflare R2 bucket.
-2. Create an AutoRAG instance in the Cloudflare dashboard linked to that R2 bucket.
-3. Create a Cloudflare API Token with **Account → AI Search Index Engine → Run** permission.
-4. Set the following environment variables:
-   ```env
-   CF_AI_SEARCH_ACCOUNT_ID=<your-account-id>
-   CF_AI_SEARCH_API_TOKEN=<your-api-token>
-   CF_AI_SEARCH_INSTANCE_NAME=<your-autorag-instance-name>
+1. Configure `docs_search` in `zerda.toml`:
+   ```toml
+   [docs_search]
+   enabled = true
+   embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
+   embedding_dim = 1536
+   qdrant_url = "http://qdrant:6333"
+   qdrant_api_key = ""
+   collection = "zerda_docs_index"
+   docs_dir = "docs/zerda"
    ```
+2. Ensure the embedding provider in `[providers.<id>]` has valid `api_key` and optional `base_url` (used as embedding API base URL).
+3. Start Zerda. On first startup, Zerda automatically vectorizes all Markdown files under `docs/zerda/` into `docs_search.collection`.
+4. Later startups perform incremental sync and only re-embed changed files.
 
-When all three variables are present, the `search_zerda_documents` tool is automatically registered. If any variable is missing, the tool is silently skipped.
+When `docs_search.enabled=true` and configuration is valid, the `search_zerda_documents` tool is registered automatically.
+`docs_search.qdrant_api_key = ""` means no API key is attached to Qdrant requests, which is correct for default local Compose deployments without Qdrant auth.
 
 ---
 

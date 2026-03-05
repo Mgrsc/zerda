@@ -134,6 +134,25 @@ ingest_max_retries = 2
 - `ingest_batch_turns`: Batch multiple turns before one ingest request; set to `1` for strict per-turn idempotency.
 - Memory API uses `Authorization: Bearer <auth_token>` and `X-Tenant-ID: <tenant_id>`.
 
+## Docs Search (Qdrant)
+
+```toml
+[docs_search]
+enabled = true
+embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
+embedding_dim = 1536
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
+collection = "zerda_docs_index"
+docs_dir = "docs/zerda"
+```
+
+- `embedding_model`: `provider_id@model_name`, provider is resolved from `[providers.<id>]`.
+- `embedding_dim`: Embedding vector dimension used to create/query the collection.
+- `qdrant_api_key`: Optional. If empty string, Zerda sends no API key header to Qdrant.
+- `docs_dir`: Markdown source directory to index.
+- On first startup, Zerda auto-indexes docs; later startups run incremental sync.
+
 ## Logging
 
 ```toml

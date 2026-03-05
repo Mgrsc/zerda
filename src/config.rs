@@ -30,6 +30,8 @@ pub struct Config {
     pub log: LogConfig,
     #[serde(default)]
     pub memory_service: MemoryServiceConfig,
+    #[serde(default)]
+    pub docs_search: DocsSearchConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -313,6 +315,38 @@ pub struct MemoryServiceConfig {
     pub ingest_max_retries: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocsSearchConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_docs_search_embedding_model")]
+    pub embedding_model: String,
+    #[serde(default = "default_docs_search_embedding_dim")]
+    pub embedding_dim: u64,
+    #[serde(default = "default_docs_search_qdrant_url")]
+    pub qdrant_url: String,
+    #[serde(default)]
+    pub qdrant_api_key: String,
+    #[serde(default = "default_docs_search_collection")]
+    pub collection: String,
+    #[serde(default = "default_docs_search_docs_dir")]
+    pub docs_dir: String,
+}
+
+impl Default for DocsSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            embedding_model: default_docs_search_embedding_model(),
+            embedding_dim: default_docs_search_embedding_dim(),
+            qdrant_url: default_docs_search_qdrant_url(),
+            qdrant_api_key: String::new(),
+            collection: default_docs_search_collection(),
+            docs_dir: default_docs_search_docs_dir(),
+        }
+    }
+}
+
 impl Default for MemoryServiceConfig {
     fn default() -> Self {
         Self {
@@ -343,6 +377,21 @@ fn default_memory_entity_id() -> String {
 }
 fn default_memory_process_id() -> String {
     "planner".to_string()
+}
+fn default_docs_search_embedding_model() -> String {
+    "openai@text-embedding-3-small".to_string()
+}
+const fn default_docs_search_embedding_dim() -> u64 {
+    1536
+}
+fn default_docs_search_qdrant_url() -> String {
+    "http://qdrant:6333".to_string()
+}
+fn default_docs_search_collection() -> String {
+    "zerda_docs_index".to_string()
+}
+fn default_docs_search_docs_dir() -> String {
+    "docs/zerda".to_string()
 }
 const fn default_recall_timeout_ms() -> u64 {
     3000
@@ -538,6 +587,46 @@ fn validate_config(config: &Config) -> Result<()> {
             config.reflection.as_model_config().is_some(),
             "reflection.enabled=true requires non-empty reflection.llm_model (provider_id@model_name)"
         );
+    }
+
+    if config.docs_search.enabled {
+        anyhow::ensure!(
+            !config.docs_search.qdrant_url.trim().is_empty(),
+            "docs_search.qdrant_url must not be empty when docs_search.enabled=true"
+        );
+        anyhow::ensure!(
+            !config.docs_search.collection.trim().is_empty(),
+            "docs_search.collection must not be empty when docs_search.enabled=true"
+        );
+        anyhow::ensure!(
+            !config.docs_search.docs_dir.trim().is_empty(),
+            "docs_search.docs_dir must not be empty when docs_search.enabled=true"
+        );
+        anyhow::ensure!(
+            config.docs_search.embedding_dim > 0,
+            "docs_search.embedding_dim must be greater than 0"
+        );
+
+        let docs_embedding_ref = ModelRef::parse(&config.docs_search.embedding_model)
+            .context("docs_search.embedding_model (expected provider_id@model_name)")?;
+        anyhow::ensure!(
+            provider_ids.contains(docs_embedding_ref.provider_id.as_str()),
+            "docs_search.embedding_model references unknown provider '{}'",
+            docs_embedding_ref.provider_id
+        );
+        if let Some(provider) = providers_by_id.get(docs_embedding_ref.provider_id.as_str()) {
+            anyhow::ensure!(
+                supports_openai_embeddings(&provider.kind),
+                "docs_search.embedding_model provider '{}' uses unsupported type '{}' for embeddings; expected openai_chat or openai_responses",
+                provider.id,
+                provider.kind
+            );
+            anyhow::ensure!(
+                !provider.api_key.trim().is_empty(),
+                "docs_search.embedding_model provider '{}' api_key must not be empty",
+                provider.id
+            );
+        }
     }
 
     if let Some(reflection_model) = config.reflection.as_model_config() {

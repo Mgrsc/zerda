@@ -32,6 +32,18 @@ embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
 embedding_dim = 1536
 
 # =============================
+# Docs Search
+# =============================
+[docs_search]
+enabled = true
+embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
+embedding_dim = 1536
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
+collection = "zerda_docs_index"
+docs_dir = "docs/zerda"
+
+# =============================
 # Channels
 # =============================
 [[channels]]

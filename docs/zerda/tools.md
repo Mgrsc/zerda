@@ -47,7 +47,9 @@ Delegate mechanical work to the Executor agent. Available when subagent provider
 
 ### `search_zerda_documents`
 
-Semantic search of Zerda's own documentation. Available when Cloudflare AI Search environment variables are configured (`CF_AI_SEARCH_ACCOUNT_ID`, `CF_AI_SEARCH_API_TOKEN`, `CF_AI_SEARCH_INSTANCE_NAME`).
+Semantic search of Zerda's own documentation. Available when `[docs_search]` is enabled and valid in `zerda.toml`.
+
+On first startup, Zerda automatically indexes `docs_search.docs_dir` into Qdrant collection `docs_search.collection`. Later startups sync incrementally.
 
 - `query`: Search query (required)
 - `max_results`: 1-10, default 5

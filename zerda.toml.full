@@ -64,6 +64,18 @@ max_tokens = 2048
 # embedding_dim = 1536                  # optional; model-specific
 
 # =============================
+# Docs Search (optional)
+# =============================
+[docs_search]
+enabled = true
+embedding_model = "openai@text-embedding-3-small"
+embedding_dim = 1536
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
+collection = "zerda_docs_index"
+docs_dir = "docs/zerda"
+
+# =============================
 # Channels (optional)
 # =============================
 # [[channels]]
