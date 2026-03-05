@@ -385,10 +385,6 @@ async fn perform_light_reload(
 
             hot.tools.truncate(hot.builtin_count);
 
-            let mcp_tools = tools::mcp::connect_mcp_servers(&new_cfg.mcp).await;
-            let mcp_count = mcp_tools.len();
-            hot.tools.extend(mcp_tools);
-
             let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
             hot.skills = skills::load_skills(&skills_dir);
             *hot.shared_skills.write().await = hot.skills.clone();
@@ -415,7 +411,7 @@ async fn perform_light_reload(
 
             let msg = format!(
                 "[System] Light reload completed successfully. \
-                 {mcp_count} MCP server(s), {skill_count} skill(s) loaded."
+                 Planner toolset refreshed, {skill_count} skill(s) loaded."
             );
             agent.push_user_message(msg);
 
@@ -706,11 +702,9 @@ pub async fn run_serve(
                             }
                             fresh
                         };
-                    let mcp_count = hot.cfg.mcp.len();
-                    let notify_msg = format!(
-                        "[System] Configuration reloaded successfully. {mcp_count} MCP server(s) configured. \
+                    let notify_msg = "[System] Configuration reloaded successfully. \
                          Briefly inform the user that the reload completed and services are back online."
-                    );
+                        .to_string();
                     notify_agent.push_user_message(notify_msg);
                     let supplement = channels.get(&channel).and_then(|ch| ch.prompt_supplement());
                     refresh_prompt(&mut notify_agent, hot, supplement.as_deref());
