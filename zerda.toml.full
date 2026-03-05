@@ -1,78 +1,123 @@
-# zerda complete configuration template
-# Fields marked as required have no code default and must be set explicitly.
-# Other values are aligned with code defaults.
-# ${VAR} syntax expands environment variables at load time.
-# Define MCP servers in mcp.toml (see mcp.toml.example).
+# zerda full configuration template
+# Unless explicitly marked as "required", every concrete value below is the runtime default in src/config.rs.
+# ${VAR} placeholders are examples and are NOT defaults.
+# mcp servers can be defined here with [[mcp]], or in a separate mcp.toml (both are merged).
 
-# [providers.<id>] defines a provider endpoint.
-# <id> is user-defined and used in model references: /model <id>@<model_name>
+# =============================
+# Providers (at least one required)
+# =============================
+# [providers.<id>] defines an endpoint.
+# <id> is referenced by model fields: <provider_id>@<model_name>.
 
 [providers.openai]
-type = "openai_chat"                    # required: openai_chat | openai_responses | anthropic
+type = "openai_chat"                    # required; supported: openai_chat | openai_responses | anthropic
 api_key = "${OPENAI_API_KEY}"           # required
-base_url = ""                           # API root up to version path, e.g. https://api.openai.com/v1
-                                        # the provider appends /chat/completions, /responses, or /messages
-                                        # leave empty to use the official default endpoint
+base_url = ""                           # default: provider-specific official endpoint
 
-# [providers.openai.extra_headers]
+[providers.openai.retry]
+max_retries = 3
+base_delay_ms = 2000
+max_delay_ms = 30000
+connect_timeout_secs = 10
+request_timeout_secs = 120
+
+# [providers.openai.extra_headers]      # default: empty
 # "HTTP-Referer" = "https://example.com"
 # "X-Title" = "zerda"
 
-# [providers.openai.retry]
-# max_retries = 3
-# base_delay_ms = 2000
-# max_delay_ms = 30000
-# connect_timeout_secs = 10
-# request_timeout_secs = 120
-
-# [providers.anthropic]
-# type = "anthropic"
-# api_key = "${ANTHROPIC_API_KEY}"
-
+# =============================
+# Agent
+# =============================
 [agent]
-max_iterations = 10                     # maximum tool calls per turn
-max_history = 30                        # trigger compression when non-system messages exceed this value
-max_tool_output_chars = 30000           # truncate tool output above this threshold
-max_memory_tokens = 2000                # maximum token count for memory tool content
-identity_path = "~/.zerda/identity.md"  # default path to the system prompt file
-show_usage = false                      # print token usage at the end of each turn
-# max_budget_tokens = 1000000           # session token budget; stop when exceeded (optional, unlimited by default)
-max_memory_file_size = 102400           # maximum memory file size in bytes
-session_cleanup_days = 7                # auto-clean sessions older than N days
-tool_timeout = 300                      # tool execution timeout in seconds
+max_iterations = 10
+max_history = 30
+max_tool_output_chars = 30000
+identity_path = "~/.zerda/identity.md"
+show_usage = false
+# max_budget_tokens = 1000000           # optional; default: unlimited (unset)
+session_cleanup_days = 7
+tool_timeout = 300
+disabled_primitives = []
 
 [agent.primary_model]
-model = "openai@${OPENAI_MODEL}"        # required: provider_id@model_name
-vision = true                           # whether to send images to the model (default: true)
-# temperature = 1.0                     # optional; default: unset (API decides)
-# top_p = 1.0                           # optional; default: unset (API decides)
-# max_tokens = 4096                     # optional; default: unset (anthropic uses 4096)
+model = "openai@${OPENAI_MODEL}"        # required
+vision = true
+# temperature = 1.0                     # optional; default: unset
+# top_p = 1.0                           # optional; default: unset
+# max_tokens = 4096                     # optional; default: unset
 
-# [agent.fast_model]                    # optional; falls back to primary_model if omitted
+# [agent.fast_model]                    # optional; default: fall back to primary_model
 # model = "openai@gpt-5.3"
 # vision = false
 # temperature = 1.0
 # top_p = 1.0
 # max_tokens = 4096
 
+# =============================
+# Reflection
+# =============================
+[reflection]
+enabled = false
+llm_model = ""                          # default: empty; required only when enabled = true
+max_tokens = 2048
+# embedding_model = "openai@text-embedding-3-small"  # optional; default: "<llm provider>@text-embedding-3-small" when enabled
+# embedding_dim = 1536                  # optional; model-specific
+
+# =============================
+# Channels (optional)
+# =============================
 # [[channels]]
 # name = "telegram"                     # currently only telegram is supported
-# token = "${TELEGRAM_BOT_TOKEN}"
-# allowed_users = []                    # default: empty means all users
+# token = "${TELEGRAM_BOT_TOKEN}"       # required when telegram channel is enabled
+# allowed_users = []                    # default: [] (empty means allow all users)
 # max_message_length = 4096
+# draft_stream_update_interval_ms = 350
 
-# TTS (optional; disabled when provider is empty)
+# =============================
+# MCP servers (optional)
+# =============================
+# [[mcp]]
+# name = "my_mcp"
+# transport = "stdio"                   # stdio | streamable-http
+# command = "npx"                       # required when transport = "stdio"
+# args = ["-y", "my-mcp-server"]
+# url = "https://example.com/mcp"       # required when transport = "streamable-http"
+# [mcp.env]
+# EXAMPLE_KEY = "value"
+
+# =============================
+# TTS / STT (optional)
+# =============================
 [tts]
-provider = ""                           # default: disabled
-# api_key = "${MINIMAX_API_KEY}"
+provider = ""                           # default: disabled; supported value when enabled: "minimax"
+# api_key = "${MINIMAX_API_KEY}"        # required when provider = "minimax"
 model = "speech-2.8-hd"
-# voice_id = "female-shaonv"            # optional; default is unset
+# voice_id = "female-shaonv"            # optional; default: unset
 
-# STT (optional; disabled when provider is empty)
 [stt]
-provider = ""                           # default: disabled
-# api_key = "${GROQ_API_KEY}"
+provider = ""                           # default: disabled; supported value when enabled: "groq"
+# api_key = "${GROQ_API_KEY}"           # required when provider = "groq"
 model = "whisper-large-v3-turbo"
 
+# =============================
+# Memory Service (optional)
+# =============================
+[memory_service]
+enabled = false
+url = "http://localhost:8080"
+auth_token = ""
+tenant_id = "default"
+default_entity_id = "user_default"
+process_id = "planner"
+recall_timeout_ms = 3000
+recall_top_k = 8
+recall_min_score = 0.6
+ingest_batch_turns = 3
+ingest_timeout_ms = 10000
+ingest_max_retries = 2
+
+# =============================
+# Logging
+# =============================
 [log]
-level = "info"                          # trace | debug | info | warn | error
+level = "info"

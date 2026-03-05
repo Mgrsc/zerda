@@ -20,6 +20,7 @@ mod logging;
 mod memory;
 mod prompt;
 mod providers;
+mod reflection;
 mod rich_content;
 mod runner;
 mod skills;
@@ -134,13 +135,7 @@ async fn main() -> Result<()> {
     let fast_provider = registry.get_or_create(&fast_ref.provider_id)?;
     let fast_chat_opts = providers::ChatOptions::from_model_config(fast_mc, &fast_ref.model_name);
 
-    let memory_dir = config::resolve_path(config::MEMORY_DIR);
-    let mem = Arc::new(memory::Memory::new(memory_dir.join("memory")));
-    mem.ensure_dirs()?;
-    mem.check_memory_size(cfg.agent.max_memory_file_size);
-
     let reload_signal = tools::reload::ReloadSignal::default();
-    let max_memory_chars = cfg.agent.max_memory_tokens * 4;
 
     let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
     let skills_list = skills::load_skills(&skills_dir);
@@ -160,18 +155,104 @@ async fn main() -> Result<()> {
     let compression_provider = (fast_provider.clone(), fast_chat_opts.clone());
     let subagent_provider = (fast_provider, fast_chat_opts);
 
+    let reflection_engine = if cfg.reflection.enabled {
+        if let Some(reflection_mc) = cfg.reflection.as_model_config() {
+            match config::ModelRef::parse(&reflection_mc.model) {
+                Ok(reflection_ref) => match registry.get_or_create(&reflection_ref.provider_id) {
+                    Ok(reflection_provider) => {
+                        let embedding_ref_result = match cfg.reflection.embedding_model.as_deref() {
+                            Some(model_ref) => config::ModelRef::parse(model_ref),
+                            None => Ok(config::ModelRef {
+                                provider_id: reflection_ref.provider_id.clone(),
+                                model_name: reflection::DEFAULT_EMBEDDING_MODEL.to_string(),
+                            }),
+                        };
+                        match embedding_ref_result {
+                            Ok(embedding_ref) => {
+                                let embedding_provider = cfg
+                                    .providers
+                                    .iter()
+                                    .find(|p| p.id == embedding_ref.provider_id.as_str());
+                                match embedding_provider {
+                                    Some(embedding_provider) => {
+                                        let reflection_opts =
+                                            providers::ChatOptions::from_model_config(
+                                                &reflection_mc,
+                                                &reflection_ref.model_name,
+                                            );
+                                        match reflection::ReflectionEngine::try_new(
+                                            reflection_provider,
+                                            reflection_opts,
+                                            cfg.reflection.embedding_dim,
+                                            embedding_provider,
+                                            &embedding_ref.model_name,
+                                        ) {
+                                            Some(engine) => {
+                                                match engine.ensure_collection().await {
+                                                    Ok(()) => Some(Arc::new(engine)),
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                        "REFLECTION: collection setup failed: {e}"
+                                                    );
+                                                        None
+                                                    }
+                                                }
+                                            }
+                                            None => None,
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "REFLECTION: embedding provider '{}' not found",
+                                            embedding_ref.provider_id
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "REFLECTION: invalid reflection.embedding_model reference: {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "REFLECTION: provider '{}' init failed: {e}",
+                            reflection_ref.provider_id
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("REFLECTION: invalid reflection.llm_model reference: {e}");
+                    None
+                }
+            }
+        } else {
+            tracing::debug!(
+                "REFLECTION: reflection.enabled=true but reflection.llm_model is empty"
+            );
+            None
+        }
+    } else {
+        None
+    };
+
     let tools_runtime = tools::BuiltinToolsRuntime {
         tool_timeout: cfg.agent.tool_timeout,
-        max_memory_chars,
         config_path: cli.config.clone(),
         reload_signal: reload_signal.clone(),
+        disabled_primitives: cfg.agent.disabled_primitives.clone(),
     };
     let tools_dependencies = tools::BuiltinToolsDependencies {
-        memory: Arc::clone(&mem),
         tts_provider,
         skills: Arc::clone(&shared_skills),
         skill_cache: Arc::clone(&skill_cache),
         subagent_provider: Some(subagent_provider),
+        reflection: reflection_engine,
     };
     let (mut all_tools, todo_handle) =
         tools::builtin_tools((tools_runtime, tools_dependencies).into());
@@ -187,7 +268,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let system_prompt = prompt::build_system_prompt(identity_text.as_deref(), None);
+    let system_prompt_parts = prompt::build_system_prompt_parts(identity_text.as_deref(), None);
 
     let mut agent = agent::Agent::new(
         cfg.agent.clone(),
@@ -196,15 +277,34 @@ async fn main() -> Result<()> {
             compression_provider.1.clone(),
         ),
     );
-    agent.set_system_prompt(system_prompt);
+    agent.set_system_prompt_parts(system_prompt_parts);
 
     let sessions_dir = config::resolve_path(config::MEMORY_DIR).join("sessions");
 
+    let memory_client = if cfg.memory_service.enabled {
+        match memory::MemoryServiceClient::new(&cfg.memory_service) {
+            Ok(client) => {
+                tracing::info!(
+                    url = %cfg.memory_service.url,
+                    tenant_id = %cfg.memory_service.tenant_id,
+                    "Memory service client initialized"
+                );
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize memory service client: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let run_ctx = runner::RunContext {
-        mem: &mem,
         config_path: cli.config.clone(),
         reload_signal,
         stt_provider,
+        memory_client,
     };
 
     let mut hot = runner::HotState {
@@ -233,11 +333,48 @@ async fn main() -> Result<()> {
             }
 
             if let Some(msg) = message {
-                runner::prepare_user_turn(&mut agent, &hot, mem.as_ref(), msg, None, None);
+                let raw_msg = msg.clone();
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                let recall_item_ids = runner::prepare_user_turn(
+                    &mut agent,
+                    &hot,
+                    msg,
+                    None,
+                    None,
+                    run_ctx.memory_client.as_ref(),
+                    None,
+                )
+                .await;
                 let response = agent
                     .run_turn(hot.active_provider.as_ref(), &hot.tools, &hot.chat_opts)
                     .await?;
                 println!("{}", channels::cli::sanitize_terminal_text(&response));
+                if let Some(client) = run_ctx.memory_client.as_ref() {
+                    let messages = vec![
+                        memory::IngestMessage {
+                            role: "user".to_string(),
+                            content: raw_msg,
+                        },
+                        memory::IngestMessage {
+                            role: "assistant".to_string(),
+                            content: response.clone(),
+                        },
+                    ];
+                    if let Err(e) = client
+                        .ingest(messages, None, None, Some(&turn_id), Some("cli"))
+                        .await
+                    {
+                        tracing::warn!("Memory ingest failed for run command: {e}");
+                    }
+                    if !recall_item_ids.is_empty() {
+                        if let Err(e) = client
+                            .feedback(&recall_item_ids, None, Some(&turn_id))
+                            .await
+                        {
+                            tracing::warn!("Memory feedback failed for run command: {e}");
+                        }
+                    }
+                }
                 if let Err(e) = agent.save_session(&sessions_dir, None) {
                     tracing::warn!("Failed to save session: {e}");
                 }

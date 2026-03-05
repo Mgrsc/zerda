@@ -17,8 +17,8 @@ use crate::channels::{self, Channel};
 use crate::commands;
 use crate::config::{self, Config, ModelRef};
 use crate::identity;
-use crate::memory::Memory;
-use crate::prompt::build_system_prompt;
+use crate::memory::{IngestBuffer, MemoryServiceClient};
+use crate::prompt::build_system_prompt_parts;
 use crate::providers::{self, ChatOptions, ContentPart, ProviderRegistry};
 use crate::rich_content;
 use crate::skills::{self, Skill};
@@ -26,11 +26,11 @@ use crate::stt::SttProvider;
 use crate::tools;
 use crate::tools::reload::ReloadSignal;
 
-pub struct RunContext<'a> {
-    pub mem: &'a Memory,
+pub struct RunContext {
     pub config_path: Option<PathBuf>,
     pub reload_signal: ReloadSignal,
     pub stt_provider: Option<Arc<dyn SttProvider>>,
+    pub memory_client: Option<MemoryServiceClient>,
 }
 
 pub struct HotState {
@@ -54,18 +54,20 @@ pub(crate) fn refresh_prompt(
     hot: &HotState,
     channel_supplement: Option<&str>,
 ) {
-    let system_prompt = build_system_prompt(hot.identity_text.as_deref(), channel_supplement);
-    agent.set_system_prompt(system_prompt);
+    let system_prompt_parts =
+        build_system_prompt_parts(hot.identity_text.as_deref(), channel_supplement);
+    agent.set_system_prompt_parts(system_prompt_parts);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_user_message(
     content: String,
     content_parts: Option<Vec<ContentPart>>,
     vision_enabled: bool,
     skills_list: &[Skill],
-    user_context: Option<&str>,
     conversation_summary: Option<&str>,
     todo_reminder: Option<String>,
+    memory_recall: Option<&str>,
 ) -> providers::ConversationMessage {
     let mut parts: Vec<ContentPart> = Vec::new();
 
@@ -78,11 +80,9 @@ fn build_user_message(
         parts.push(ContentPart::Text(reminder));
     }
 
-    if let Some(ctx) = user_context {
-        if !ctx.trim().is_empty() {
-            parts.push(ContentPart::Text(format!(
-                "<user-context>\n{ctx}\n</user-context>"
-            )));
+    if let Some(recall) = memory_recall {
+        if !recall.trim().is_empty() {
+            parts.push(ContentPart::Text(recall.to_string()));
         }
     }
 
@@ -133,28 +133,48 @@ fn build_user_message(
     providers::ConversationMessage::user_parts(parts)
 }
 
-pub(crate) fn prepare_user_turn(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_user_turn(
     agent: &mut agent::Agent,
     hot: &HotState,
-    mem: &Memory,
     content: String,
     content_parts: Option<Vec<ContentPart>>,
     channel_supplement: Option<&str>,
-) {
-    let user_ctx = mem.load_user_context();
+    memory_client: Option<&MemoryServiceClient>,
+    entity_id: Option<&str>,
+) -> Vec<String> {
     let summary = agent.take_conversation_summary();
     let todo_reminder = hot.todo.pending_reminder();
+
+    let mut recall_item_ids = Vec::new();
+    let memory_recall = if let Some(client) = memory_client {
+        match client.recall(&content, entity_id).await {
+            Ok(items) => {
+                let filtered_items = client.filter_recall_items(items);
+                recall_item_ids = filtered_items.iter().filter_map(|i| i.id.clone()).collect();
+                MemoryServiceClient::format_recall_context(&filtered_items)
+            }
+            Err(e) => {
+                tracing::warn!("Memory recall failed, skipping: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let user_msg = build_user_message(
         content,
         content_parts,
         hot.cfg.agent.primary_model.vision,
         &hot.skills,
-        user_ctx.as_deref(),
         summary.as_deref(),
         todo_reminder,
+        memory_recall.as_deref(),
     );
     agent.history.push(user_msg);
     refresh_prompt(agent, hot, channel_supplement);
+    recall_item_ids
 }
 
 enum BudgetStatus {
@@ -162,7 +182,20 @@ enum BudgetStatus {
     Exhausted,
 }
 
-async fn post_turn(agent: &mut agent::Agent, hot: &HotState) -> BudgetStatus {
+#[allow(clippy::too_many_arguments)]
+async fn post_turn(
+    agent: &mut agent::Agent,
+    hot: &HotState,
+    memory_client: Option<&MemoryServiceClient>,
+    ingest_buffer: Option<&mut IngestBuffer>,
+    entity_id: Option<&str>,
+    session_id: Option<&str>,
+    turn_id: Option<&str>,
+    channel: Option<&str>,
+    raw_user_content: Option<&str>,
+    assistant_response: Option<&str>,
+    recall_item_ids: &[String],
+) -> BudgetStatus {
     if hot.cfg.agent.show_usage {
         let msg = format!(
             "tokens: in={}, out={}, total={}",
@@ -186,7 +219,48 @@ async fn post_turn(agent: &mut agent::Agent, hot: &HotState) -> BudgetStatus {
     {
         tracing::warn!("Auto-compact failed: {e}");
     }
+
+    if let (Some(client), Some(buffer)) = (memory_client, ingest_buffer) {
+        let tid = turn_id.unwrap_or("");
+        buffer.push(raw_user_content, assistant_response, tid);
+        if buffer.should_flush() {
+            flush_ingest_buffer(buffer, client, entity_id, session_id, channel).await;
+        }
+        if !recall_item_ids.is_empty() {
+            if let Err(e) = client.feedback(recall_item_ids, entity_id, turn_id).await {
+                tracing::warn!("Memory feedback failed: {e}");
+            }
+        }
+    }
+
     BudgetStatus::Ok
+}
+
+async fn flush_ingest_buffer(
+    buffer: &mut IngestBuffer,
+    client: &MemoryServiceClient,
+    entity_id: Option<&str>,
+    session_id: Option<&str>,
+    channel: Option<&str>,
+) {
+    if !buffer.has_pending() {
+        return;
+    }
+    if let Some(turns) = buffer.take() {
+        for (messages, turn_id) in turns {
+            tracing::debug!(
+                message_count = messages.len(),
+                turn_id = %turn_id,
+                "Flushing ingest buffer"
+            );
+            if let Err(e) = client
+                .ingest(messages, entity_id, session_id, Some(&turn_id), channel)
+                .await
+            {
+                tracing::warn!("Memory ingest failed: {e}");
+            }
+        }
+    }
 }
 
 fn retry_config_equal(a: &config::RetryConfig, b: &config::RetryConfig) -> bool {
@@ -272,17 +346,11 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
     if old_cfg.agent.max_tool_output_chars != new_cfg.agent.max_tool_output_chars {
         blockers.push("agent.max_tool_output_chars".to_string());
     }
-    if old_cfg.agent.max_memory_tokens != new_cfg.agent.max_memory_tokens {
-        blockers.push("agent.max_memory_tokens".to_string());
-    }
     if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
         blockers.push("agent.show_usage".to_string());
     }
     if old_cfg.agent.max_budget_tokens != new_cfg.agent.max_budget_tokens {
         blockers.push("agent.max_budget_tokens".to_string());
-    }
-    if old_cfg.agent.max_memory_file_size != new_cfg.agent.max_memory_file_size {
-        blockers.push("agent.max_memory_file_size".to_string());
     }
     if old_cfg.agent.session_cleanup_days != new_cfg.agent.session_cleanup_days {
         blockers.push("agent.session_cleanup_days".to_string());
@@ -296,7 +364,7 @@ fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
 
 async fn perform_light_reload(
     agent: &mut agent::Agent,
-    ctx: &RunContext<'_>,
+    ctx: &RunContext,
     hot: &mut HotState,
     channel_supplement: Option<&str>,
 ) {
@@ -363,7 +431,7 @@ async fn perform_light_reload(
 
 async fn check_reload(
     agent: &mut agent::Agent,
-    ctx: &RunContext<'_>,
+    ctx: &RunContext,
     hot: &mut HotState,
     channel_supplement: Option<&str>,
 ) {
@@ -389,13 +457,14 @@ fn create_channel_registry(
 
 pub async fn run_interactive(
     agent: &mut agent::Agent,
-    ctx: &RunContext<'_>,
+    ctx: &RunContext,
     hot: &mut HotState,
     sessions_dir: &std::path::Path,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<channels::ChannelMessage>(32);
     let cli_channel = channels::cli::CliChannel;
     let mut pending: Vec<channels::ChannelMessage> = Vec::new();
+    let mut ingest_buffer = IngestBuffer::new(hot.cfg.memory_service.ingest_batch_turns);
 
     tokio::spawn(async move {
         if let Err(e) = cli_channel.listen(tx).await {
@@ -430,7 +499,18 @@ pub async fn run_interactive(
             commands::CommandResult::NotACommand => {}
         }
         let snapshot = agent.snapshot_turn();
-        prepare_user_turn(agent, hot, ctx.mem, msg.content, msg.content_parts, None);
+        let interactive_turn_id = Uuid::new_v4().to_string();
+        let raw_content = msg.content.clone();
+        let recall_item_ids = prepare_user_turn(
+            agent,
+            hot,
+            msg.content,
+            msg.content_parts,
+            None,
+            ctx.memory_client.as_ref(),
+            None,
+        )
+        .await;
 
         let mut cancelled = false;
         let mut run_result = None;
@@ -485,9 +565,13 @@ pub async fn run_interactive(
             continue;
         }
 
+        let mut turn_response = None;
         if let Some(result) = run_result {
             match result {
-                Ok(_) => println!("\n"),
+                Ok(ref resp) => {
+                    turn_response = Some(resp.clone());
+                    println!("\n");
+                }
                 Err(e) => eprintln!("\nError: {e}\n"),
             }
         } else {
@@ -511,7 +595,26 @@ pub async fn run_interactive(
 
         check_reload(agent, ctx, hot, None).await;
 
-        if matches!(post_turn(agent, hot).await, BudgetStatus::Exhausted) {
+        if matches!(
+            post_turn(
+                agent,
+                hot,
+                ctx.memory_client.as_ref(),
+                Some(&mut ingest_buffer),
+                None,
+                None,
+                Some(&interactive_turn_id),
+                None,
+                Some(&raw_content),
+                turn_response.as_deref(),
+                &recall_item_ids,
+            )
+            .await,
+            BudgetStatus::Exhausted
+        ) {
+            if let Some(client) = ctx.memory_client.as_ref() {
+                flush_ingest_buffer(&mut ingest_buffer, client, None, None, None).await;
+            }
             eprintln!("Token budget exhausted. Ending session.");
             break;
         }
@@ -526,11 +629,15 @@ pub async fn run_interactive(
         }
     }
 
+    if let Some(client) = ctx.memory_client.as_ref() {
+        flush_ingest_buffer(&mut ingest_buffer, client, None, None, None).await;
+    }
+
     Ok(())
 }
 
 pub async fn run_serve(
-    ctx: &RunContext<'_>,
+    ctx: &RunContext,
     hot: &mut HotState,
     sessions_dir: &std::path::Path,
 ) -> Result<()> {
@@ -559,6 +666,7 @@ pub async fn run_serve(
     let mut pending: Vec<channels::ChannelMessage> = Vec::new();
     let mut session_agents: HashMap<String, agent::Agent> = HashMap::new();
     let mut session_recipients: HashMap<String, String> = HashMap::new();
+    let mut session_ingest_buffers: HashMap<String, IngestBuffer> = HashMap::new();
 
     let memory_dir = config::resolve_path(config::MEMORY_DIR);
     let reload_marker = memory_dir.join(".reload-pending");
@@ -754,14 +862,18 @@ pub async fn run_serve(
         let supplement = ch.as_ref().and_then(|c| c.prompt_supplement());
         let snapshot = session_agent.snapshot_turn();
         hot.todo.set_session(&session_key);
-        prepare_user_turn(
+        let serve_entity_id = format!("{channel_name}:{sender}");
+        let raw_content = content.clone();
+        let recall_item_ids = prepare_user_turn(
             &mut session_agent,
             hot,
-            ctx.mem,
             content,
             content_parts,
             supplement.as_deref(),
-        );
+            ctx.memory_client.as_ref(),
+            Some(&serve_entity_id),
+        )
+        .await;
 
         let typing_cancel = CancellationToken::new();
         if let Some(ref ch) = ch {
@@ -812,6 +924,21 @@ pub async fn run_serve(
         };
         let captured_messages = tool_phase_buffer.as_ref().map(Arc::clone);
         let tool_phase_tx_for_cb = tool_phase_tx.clone();
+        let mut live_stream_handle = None;
+        let live_stream_tx = if let Some(ref ch_ref) = ch {
+            let (tx, rx) = mpsc::unbounded_channel::<LiveStreamEvent>();
+            let ch = Arc::clone(ch_ref);
+            let sender = sender.clone();
+            let span = turn_span.clone();
+            live_stream_handle = Some(tokio::spawn(
+                async move { dispatch_live_stream(ch, sender, rx).await }.instrument(span),
+            ));
+            Some(tx)
+        } else {
+            None
+        };
+        let live_stream_tx_for_delta = live_stream_tx.clone();
+        let live_stream_tx_for_cb = live_stream_tx.clone();
         let mut cancelled = queued_cancel;
         let mut rx_closed = false;
         let mut response = String::new();
@@ -821,9 +948,16 @@ pub async fn run_serve(
                     hot.active_provider.as_ref(),
                     &hot.tools,
                     &hot.chat_opts,
-                    |_| {},
+                    move |delta| {
+                        if let Some(tx) = &live_stream_tx_for_delta {
+                            let _ = tx.send(LiveStreamEvent::Delta(delta.to_string()));
+                        }
+                    },
                     move |text, has_tool_calls| {
                         if has_tool_calls {
+                            if let Some(tx) = &live_stream_tx_for_cb {
+                                let _ = tx.send(LiveStreamEvent::Reset);
+                            }
                             if let Some(message) = normalize_tool_phase_message(text) {
                                 let chars = message.chars().count();
                                 tracing::debug!(chars, "Captured tool-phase assistant content");
@@ -885,11 +1019,23 @@ pub async fn run_serve(
 
         typing_cancel.cancel();
         drop(tool_phase_tx);
+        drop(live_stream_tx);
         if let Some(handle) = tool_phase_handle {
             if let Err(e) = handle.await {
                 tracing::warn!("Tool-phase sender task panicked: {e}");
             }
         }
+        let live_stream_summary = if let Some(handle) = live_stream_handle {
+            match handle.await {
+                Ok(summary) => summary,
+                Err(e) => {
+                    tracing::warn!("Live stream sender task panicked: {e}");
+                    LiveStreamDispatchSummary::default()
+                }
+            }
+        } else {
+            LiveStreamDispatchSummary::default()
+        };
 
         if cancelled {
             session_agent.restore_turn(snapshot);
@@ -905,6 +1051,18 @@ pub async fn run_serve(
                 elapsed_ms = turn_started.elapsed().as_millis(),
                 "Turn cancelled"
             );
+            if let Some(client) = ctx.memory_client.as_ref() {
+                if let Some(buf) = session_ingest_buffers.get_mut(&session_key) {
+                    flush_ingest_buffer(
+                        buf,
+                        client,
+                        Some(&serve_entity_id),
+                        Some(&session_id),
+                        Some(&channel_name),
+                    )
+                    .await;
+                }
+            }
             if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
                 tracing::warn!("Failed to save session {storage_id}: {e}");
             }
@@ -918,7 +1076,14 @@ pub async fn run_serve(
                 "Sending assistant messages"
             );
             if let Some(final_message) = normalize_final_message(&response) {
-                if let Err(e) = send_final_message_streamed(ch, &sender, &final_message).await {
+                if let Err(e) = send_final_message(
+                    ch,
+                    &sender,
+                    &final_message,
+                    live_stream_summary.stream_message_id.as_deref(),
+                )
+                .await
+                {
                     tracing::warn!("Failed to send response via {}: {e}", channel_name);
                 }
             }
@@ -947,10 +1112,41 @@ pub async fn run_serve(
         check_reload(&mut session_agent, ctx, hot, supplement.as_deref()).await;
 
         if matches!(
-            post_turn(&mut session_agent, hot).await,
+            post_turn(
+                &mut session_agent,
+                hot,
+                ctx.memory_client.as_ref(),
+                Some(
+                    session_ingest_buffers
+                        .entry(session_key.clone())
+                        .or_insert_with(|| IngestBuffer::new(
+                            hot.cfg.memory_service.ingest_batch_turns
+                        )),
+                ),
+                Some(&serve_entity_id),
+                Some(&session_id),
+                Some(&turn_id),
+                Some(&channel_name),
+                Some(&raw_content),
+                Some(&response),
+                &recall_item_ids,
+            )
+            .await,
             BudgetStatus::Exhausted
         ) {
             tracing::warn!("Token budget exhausted for session {session_key}");
+            if let Some(client) = ctx.memory_client.as_ref() {
+                if let Some(buf) = session_ingest_buffers.get_mut(&session_key) {
+                    flush_ingest_buffer(
+                        buf,
+                        client,
+                        Some(&serve_entity_id),
+                        Some(&session_id),
+                        Some(&channel_name),
+                    )
+                    .await;
+                }
+            }
             if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
                 tracing::warn!("Failed to save session {storage_id}: {e}");
             }
@@ -962,6 +1158,34 @@ pub async fn run_serve(
             tracing::warn!("Failed to save session {storage_id}: {e}");
         }
         session_agents.insert(session_key, session_agent);
+    }
+
+    if let Some(client) = ctx.memory_client.as_ref() {
+        for (session_key, buffer) in &mut session_ingest_buffers {
+            let Some((channel, session_id)) = session_key.split_once(':') else {
+                tracing::warn!(
+                    session_key,
+                    "Invalid session key while flushing memory buffer"
+                );
+                continue;
+            };
+            let Some(sender) = session_recipients.get(session_key) else {
+                tracing::warn!(
+                    session_key,
+                    "Missing session recipient while flushing memory buffer"
+                );
+                continue;
+            };
+            let entity_id = format!("{channel}:{sender}");
+            flush_ingest_buffer(
+                buffer,
+                client,
+                Some(&entity_id),
+                Some(session_id),
+                Some(channel),
+            )
+            .await;
+        }
     }
 
     Ok(())
@@ -994,28 +1218,102 @@ fn normalize_final_message(raw: &str) -> Option<String> {
     }
 }
 
-fn build_stream_prefixes(text: &str, step_chars: usize) -> Vec<String> {
-    let step = step_chars.max(1);
-    let mut prefixes = Vec::new();
-    let mut acc = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        acc.push(ch);
-        count += 1;
-        if count.is_multiple_of(step) {
-            prefixes.push(acc.clone());
-        }
-    }
-    if prefixes.last() != Some(&acc) {
-        prefixes.push(acc);
-    }
-    prefixes
+enum LiveStreamEvent {
+    Delta(String),
+    Reset,
 }
 
-async fn send_final_message_streamed(
+#[derive(Default)]
+struct LiveStreamDispatchSummary {
+    stream_message_id: Option<String>,
+    overflowed: bool,
+}
+
+fn apply_live_stream_event(
+    event: LiveStreamEvent,
+    stream_text: &mut String,
+    overflowed: &mut bool,
+) {
+    match event {
+        LiveStreamEvent::Delta(delta) => stream_text.push_str(&delta),
+        LiveStreamEvent::Reset => {
+            stream_text.clear();
+            *overflowed = false;
+        }
+    }
+}
+
+async fn dispatch_live_stream(
+    channel: Arc<dyn Channel>,
+    recipient: String,
+    mut rx: mpsc::UnboundedReceiver<LiveStreamEvent>,
+) -> LiveStreamDispatchSummary {
+    let mut summary = LiveStreamDispatchSummary::default();
+    let mut stream_text = String::new();
+    let mut disabled = false;
+
+    while let Some(event) = rx.recv().await {
+        apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+        while let Ok(event) = rx.try_recv() {
+            apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+        }
+
+        if disabled {
+            continue;
+        }
+
+        let clean_text = rich_content::strip_rich_markers(&stream_text);
+        if clean_text.is_empty() {
+            continue;
+        }
+        let clean_chars = clean_text.chars().count();
+        if clean_chars > config::STREAM_OVERFLOW_CHARS {
+            if !summary.overflowed {
+                tracing::debug!(
+                    clean_chars,
+                    max_chars = config::STREAM_OVERFLOW_CHARS,
+                    "Live stream overflow reached; skip intermediate updates"
+                );
+            }
+            summary.overflowed = true;
+            continue;
+        }
+
+        let update = format!("{clean_text}▌");
+        if let Some(message_id) = summary.stream_message_id.clone() {
+            if let Err(e) = channel
+                .send_stream_update(&recipient, &message_id, &update)
+                .await
+            {
+                tracing::warn!("Failed to send live stream update: {e}");
+                summary.stream_message_id = None;
+                disabled = true;
+            }
+            continue;
+        }
+
+        match channel.send_stream_start(&recipient, &update).await {
+            Ok(Some(message_id)) => {
+                summary.stream_message_id = Some(message_id);
+            }
+            Ok(None) => {
+                disabled = true;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start live stream: {e}");
+                disabled = true;
+            }
+        }
+    }
+
+    summary
+}
+
+async fn send_final_message(
     channel: &Arc<dyn Channel>,
     recipient: &str,
     message: &str,
+    stream_message_id: Option<&str>,
 ) -> Result<()> {
     let clean_text = rich_content::strip_rich_markers(message);
     let markers = rich_content::rich_content_markers(message);
@@ -1027,29 +1325,16 @@ async fn send_final_message_streamed(
         return Ok(());
     }
 
-    if clean_text.chars().count() > config::STREAM_OVERFLOW_CHARS {
-        channel.send(&clean_text, recipient).await?;
-    } else {
-        let prefixes = build_stream_prefixes(&clean_text, 80);
-        let mut fallback_plain = true;
-        if let Some(first) = prefixes.first() {
-            let start_text = format!("{first}▌");
-            if let Some(message_id) = channel.send_stream_start(recipient, &start_text).await? {
-                fallback_plain = false;
-                for prefix in prefixes.iter().skip(1) {
-                    let update = format!("{prefix}▌");
-                    channel
-                        .send_stream_update(recipient, &message_id, &update)
-                        .await?;
-                }
-                channel
-                    .send_stream_update(recipient, &message_id, &clean_text)
-                    .await?;
-            }
-        }
-        if fallback_plain {
+    if let Some(message_id) = stream_message_id {
+        if let Err(e) = channel
+            .send_stream_update(recipient, message_id, &clean_text)
+            .await
+        {
+            tracing::warn!("Failed to finalize stream update, falling back to send: {e}");
             channel.send(&clean_text, recipient).await?;
         }
+    } else {
+        channel.send(&clean_text, recipient).await?;
     }
 
     for marker in markers {

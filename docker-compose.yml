@@ -13,6 +13,18 @@ services:
       - ./zerda.toml:/root/.zerda/zerda.toml
       - ./identity.md:/root/.zerda/identity.md
       # - ./mcp.toml:/root/.zerda/mcp.toml
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: docker.io/qdrant/qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
 
 volumes:
   zerda-data:
+  qdrant-data:

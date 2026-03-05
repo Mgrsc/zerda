@@ -1,35 +1,81 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Local;
+use regex::Regex;
 use serde_json::json;
 
-use super::read::ReadTool;
+use super::execute_python_script::ExecutePythonScriptTool;
 use super::shell::ShellTool;
 use super::{Tool, ToolResult};
 use crate::providers::{
     ChatOptions, ContentPart, ConversationMessage, Provider, Role, ToolCall, ToolSpec,
 };
+use crate::reflection::types::{IterationOutcome, ReflectionContext};
+use crate::reflection::ReflectionEngine;
 use crate::util::text::TruncateForUi;
 
 const MAX_ITERATIONS: usize = 10;
 const MAX_TOOL_OUTPUT_CHARS: usize = 10_000_000;
 const MAX_TOKENS: u32 = 4096;
+const EXECUTOR_DIR: &str = "~/.zerda/executor_jobs";
+const MAX_KEY_OUTPUT_CHARS: usize = 6000;
+const EXECUTOR_SYSTEM_PROMPT: &str = include_str!("../prompts/executor_system.md");
+const EXECUTOR_PRIMITIVES_PROMPT: &str = include_str!("../prompts/executor_primitives.md");
+const EXECUTOR_DELEGATE_TEMPLATE: &str = include_str!("../prompts/executor_delegate.md");
+const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
+const PRIMITIVES_ROOT: &str = "code_primitives/python";
+const PRIMITIVES_CATALOG_FILE: &str = "primitives_catalog.md";
+const TELEMETRY_FILE: &str = "telemetry.jsonl";
+const DEFAULT_SYSTEM_PRIMITIVES_ROOT: &str = "/usr/local/share/zerda/code_primitives/python";
+const MAX_PRIMITIVES_IN_PROMPT: usize = 3;
+const MAX_SIGNATURE_CHARS: usize = 180;
+const MAX_SUMMARY_CHARS: usize = 96;
+const MAX_CONTRACT_CHARS: usize = 240;
+
+#[derive(Clone)]
+struct PrimitiveRuntime {
+    catalog_slim: String,
+    primitives_py_root: Option<PathBuf>,
+    bootstrap_path: Option<PathBuf>,
+    disabled_primitives: Vec<String>,
+}
+
+#[derive(Clone)]
+struct PrimitiveFunction {
+    name: String,
+    signature: String,
+    summary: String,
+    output_contract: String,
+}
 
 pub struct SubAgentTool {
     provider: Arc<dyn Provider>,
     chat_opts: ChatOptions,
     tool_timeout: u64,
+    reflection: Option<Arc<ReflectionEngine>>,
+    disabled_primitives: Vec<String>,
 }
 
 impl SubAgentTool {
-    pub fn new(provider: Arc<dyn Provider>, mut chat_opts: ChatOptions, tool_timeout: u64) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        mut chat_opts: ChatOptions,
+        tool_timeout: u64,
+        reflection: Option<Arc<ReflectionEngine>>,
+        disabled_primitives: Vec<String>,
+    ) -> Self {
         chat_opts.max_tokens = Some(MAX_TOKENS);
         Self {
             provider,
             chat_opts,
             tool_timeout,
+            reflection,
+            disabled_primitives,
         }
     }
 }
@@ -37,81 +83,122 @@ impl SubAgentTool {
 #[async_trait]
 impl Tool for SubAgentTool {
     fn name(&self) -> &str {
-        "subagent"
+        "delegate_to_executor"
     }
 
     fn description(&self) -> &str {
-        "Use this tool only for bounded auxiliary work, not as a replacement for the main assistant. \
-         Suitable cases: processing very large files, extracting specific data, generating concise \
-         summaries, or running background sub-steps that benefit from isolated tool use. \
-         Do not delegate the user's full request, final decision-making, or end-to-end task ownership \
-         to the sub-agent. The main assistant must remain responsible for planning, integration, and \
-         the final user-facing answer."
+        "Delegate execution to the executor via structured instruction: ACTION(params) -> {return_fields}. \
+         The executor generates and runs scripts under ~/.zerda/executor_jobs/. \
+         Returns key results and artifact paths."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "prompt": {
+                "instruction": {
                     "type": "string",
-                    "description": "Instructions for the sub-agent describing what to do"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Text content to pass directly to the sub-agent (mutually exclusive with file_path)"
-                },
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to a file for the sub-agent to process (mutually exclusive with content)"
+                    "description": "Structured instruction: ACTION(params) -> {return_fields}. Example: FETCH_WEATHER(loc=\"Beijing\") -> {temp_c, condition}"
                 }
             },
-            "required": ["prompt"]
+            "required": ["instruction"]
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let prompt = args
-            .get("prompt")
+        let instruction = args
+            .get("instruction")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: prompt"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: instruction"))?;
+        let action_name = extract_action_name(instruction);
+        let artifact = prepare_executor_artifacts(&action_name, instruction)?;
+        let primitives =
+            load_primitives_runtime(&artifact, instruction, &self.disabled_primitives)?;
+        let user_message = build_executor_user_message(instruction, &artifact);
+        let mut system_parts = build_executor_system_parts(&primitives);
 
-        let content = args.get("content").and_then(|v| v.as_str());
-        let file_path = args.get("file_path").and_then(|v| v.as_str());
-
-        let user_message = match (content, file_path) {
-            (Some(c), _) => format!("{prompt}\n\n<content>\n{c}\n</content>"),
-            (_, Some(path)) => format!(
-                "{prompt}\n\nThe content is in the file: {path}\nUse the `read` tool to read it."
-            ),
-            _ => prompt.to_string(),
-        };
+        let mut injected_guideline_ids: Vec<String> = Vec::new();
+        if let Some(ref engine) = self.reflection {
+            match engine.query_guidelines(instruction, 2).await {
+                Ok(guidelines) if !guidelines.is_empty() => {
+                    let tips: Vec<String> = guidelines
+                        .iter()
+                        .map(|g| format!("- {}", g.guideline_text))
+                        .collect();
+                    injected_guideline_ids = guidelines.iter().map(|g| g.id.clone()).collect();
+                    system_parts.push(ContentPart::Text(format!(
+                        "<system-reminder>\nLessons from past similar tasks:\n{}\n</system-reminder>",
+                        tips.join("\n")
+                    )));
+                    tracing::debug!(
+                        "REFLECTION: injected {} guidelines into executor prompt",
+                        guidelines.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("REFLECTION: guideline query failed: {e}");
+                }
+                _ => {}
+            }
+        }
 
         let inner_tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ExecutePythonScriptTool::new(
+                artifact.script_path.clone(),
+                artifact.log_path.clone(),
+                artifact.out_path.clone(),
+                artifact.telemetry_path.clone(),
+                self.tool_timeout,
+                primitives.primitives_py_root.clone(),
+                primitives.bootstrap_path.clone(),
+                primitives.disabled_primitives.clone(),
+            )),
             Box::new(ShellTool::new(self.tool_timeout)),
-            Box::new(ReadTool),
         ];
         let tool_specs: Vec<ToolSpec> = inner_tools.iter().map(|t| t.spec()).collect();
         let tool_map: HashMap<&str, &dyn Tool> =
             inner_tools.iter().map(|t| (t.name(), t.as_ref())).collect();
 
-        let system = ConversationMessage::system(
-            "You are a focused assistant. Complete the given task using available tools. \
-             Be concise and return only the requested information.",
-        );
+        let system = ConversationMessage {
+            role: Role::System,
+            content: system_parts,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
+        };
 
         let mut history = vec![system, ConversationMessage::user(user_message)];
+        let mut last_text = String::new();
+        let mut iteration_outcomes: Vec<IterationOutcome> = Vec::new();
 
         for _ in 0..MAX_ITERATIONS {
             let response = self
                 .provider
                 .chat(&history, &tool_specs, &self.chat_opts)
                 .await?;
+            if let Some(text) = &response.text {
+                if !text.trim().is_empty() {
+                    last_text = text.clone();
+                }
+            }
 
             if response.tool_calls.is_empty() {
+                let failed = executor_result_failed(&artifact);
+                let output = build_executor_result(
+                    response.text.as_deref().unwrap_or(""),
+                    &artifact,
+                    failed,
+                );
+                self.maybe_spawn_reflection(
+                    instruction,
+                    history,
+                    iteration_outcomes,
+                    failed,
+                    injected_guideline_ids,
+                );
                 return Ok(ToolResult {
-                    output: response.text.unwrap_or_default(),
-                    is_error: false,
+                    output,
+                    is_error: failed,
                 });
             }
 
@@ -129,23 +216,68 @@ impl Tool for SubAgentTool {
             }
             history.push(assistant_msg);
 
+            let mut had_tool_error = false;
+            let mut had_traceback = false;
             for tc in &response.tool_calls {
                 let result = execute_inner_tool(&tool_map, tc).await;
+                if result.is_error {
+                    had_tool_error = true;
+                }
+                if result.output.contains("Traceback (most recent call last)") {
+                    had_traceback = true;
+                }
                 history.push(ConversationMessage::tool_result(
                     &tc.id,
                     result.output.truncate_for_ui(MAX_TOOL_OUTPUT_CHARS),
                     result.is_error,
                 ));
             }
+            iteration_outcomes.push(IterationOutcome {
+                had_tool_error,
+                had_traceback,
+            });
         }
 
         let final_response = self.provider.chat(&history, &[], &self.chat_opts).await?;
+        let final_text = final_response
+            .text
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(last_text);
+        let failed = executor_result_failed(&artifact);
+        self.maybe_spawn_reflection(
+            instruction,
+            history,
+            iteration_outcomes,
+            failed,
+            injected_guideline_ids,
+        );
         Ok(ToolResult {
-            output: final_response.text.unwrap_or_else(|| {
-                "Sub-agent reached max iterations without final answer.".to_string()
-            }),
-            is_error: false,
+            output: build_executor_result(final_text.as_str(), &artifact, failed),
+            is_error: failed,
         })
+    }
+}
+
+impl SubAgentTool {
+    fn maybe_spawn_reflection(
+        &self,
+        instruction: &str,
+        history: Vec<ConversationMessage>,
+        iteration_outcomes: Vec<IterationOutcome>,
+        final_failed: bool,
+        injected_guideline_ids: Vec<String>,
+    ) {
+        if let Some(ref engine) = self.reflection {
+            let ctx = ReflectionContext {
+                instruction: instruction.to_string(),
+                history,
+                iteration_outcomes,
+                final_failed,
+                injected_guideline_ids,
+            };
+            engine.spawn_reflection(ctx);
+        }
     }
 }
 
@@ -164,4 +296,528 @@ async fn execute_inner_tool(tool_map: &HashMap<&str, &dyn Tool>, call: &ToolCall
             is_error: true,
         }
     }
+}
+
+struct ExecutorArtifacts {
+    script_path: PathBuf,
+    log_path: PathBuf,
+    out_path: PathBuf,
+    meta_path: PathBuf,
+    telemetry_path: PathBuf,
+    catalog_path: PathBuf,
+}
+
+fn prepare_executor_artifacts(action_name: &str, instruction: &str) -> Result<ExecutorArtifacts> {
+    let root = crate::config::resolve_path(EXECUTOR_DIR);
+    std::fs::create_dir_all(&root)?;
+
+    let now = Local::now();
+    let day = now.format("%Y%m%d").to_string();
+    let time = now.format("%H%M%S").to_string();
+    let basis = if action_name.trim().is_empty() {
+        instruction
+    } else {
+        action_name
+    };
+    let slug = sanitize_slug(basis);
+    let task_dir = root.join(day).join(format!("{time}_{slug}"));
+    std::fs::create_dir_all(&task_dir)?;
+
+    let script_path = task_dir.join("script.py");
+    let log_path = task_dir.join("run.log");
+    let out_path = task_dir.join("result.out");
+    let meta_path = task_dir.join("task.meta");
+    let telemetry_path = task_dir.join(TELEMETRY_FILE);
+    let catalog_path = task_dir.join(PRIMITIVES_CATALOG_FILE);
+
+    let meta = format!(
+        "created_at: {}\nscript: {}\nlog: {}\nout: {}\ntelemetry: {}\nprimitives_catalog: {}\ninstruction:\n{}\n",
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
+        script_path.display(),
+        log_path.display(),
+        out_path.display(),
+        telemetry_path.display(),
+        catalog_path.display(),
+        instruction
+    );
+    std::fs::write(&meta_path, meta)?;
+
+    Ok(ExecutorArtifacts {
+        script_path,
+        log_path,
+        out_path,
+        meta_path,
+        telemetry_path,
+        catalog_path,
+    })
+}
+
+fn build_executor_user_message(instruction: &str, a: &ExecutorArtifacts) -> String {
+    EXECUTOR_DELEGATE_TEMPLATE
+        .replace("{{INSTRUCTION}}", instruction)
+        .replace("{{SCRIPT_PATH}}", &a.script_path.display().to_string())
+        .replace("{{LOG_PATH}}", &a.log_path.display().to_string())
+        .replace("{{OUT_PATH}}", &a.out_path.display().to_string())
+}
+
+fn build_executor_system_parts(primitives: &PrimitiveRuntime) -> Vec<ContentPart> {
+    let mut parts = vec![ContentPart::Text(
+        EXECUTOR_SYSTEM_PROMPT.trim_end().to_string(),
+    )];
+    if !primitives.catalog_slim.is_empty() {
+        let primitives_block = EXECUTOR_PRIMITIVES_PROMPT
+            .replace("{{PRIMITIVES_CATALOG}}", &primitives.catalog_slim)
+            .trim_end()
+            .to_string();
+        parts.push(ContentPart::Text(primitives_block));
+    }
+    parts
+}
+
+fn executor_result_failed(a: &ExecutorArtifacts) -> bool {
+    let content = std::fs::read_to_string(&a.out_path).unwrap_or_default();
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.eq_ignore_ascii_case("timeout or error") {
+        return true;
+    }
+    trimmed.contains("Traceback (most recent call last)")
+}
+
+fn build_executor_result(summary: &str, a: &ExecutorArtifacts, failed: bool) -> String {
+    let out_content = std::fs::read_to_string(&a.out_path).unwrap_or_default();
+    let primary = if !out_content.trim().is_empty() {
+        out_content.truncate_for_ui(MAX_KEY_OUTPUT_CHARS)
+    } else if !summary.trim().is_empty() {
+        summary.trim().to_string()
+    } else {
+        "(executor returned empty content)".to_string()
+    };
+    let status_line = if failed {
+        "[executor_status: partial]"
+    } else {
+        "[executor_status: ok]"
+    };
+    format!(
+        "{status_line}\n{primary}\n\n[artifacts]\nscript: {script}\nresult: {out}\nlog: {log}\nmeta: {meta}\ntelemetry: {telemetry}\nprimitives_catalog: {catalog}",
+        script = a.script_path.display(),
+        out = a.out_path.display(),
+        log = a.log_path.display(),
+        meta = a.meta_path.display(),
+        telemetry = a.telemetry_path.display(),
+        catalog = a.catalog_path.display(),
+    )
+}
+
+fn extract_action_name(instruction: &str) -> String {
+    let trimmed = instruction.trim();
+    if let Some(paren_idx) = trimmed.find('(') {
+        let action = trimmed[..paren_idx].trim();
+        if !action.is_empty()
+            && action
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return action.to_lowercase();
+        }
+    }
+    String::new()
+}
+
+fn sanitize_slug(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_underscore = false;
+    for ch in raw.chars().flat_map(char::to_lowercase) {
+        let valid = ch.is_ascii_alphanumeric();
+        if valid {
+            out.push(ch);
+            prev_underscore = false;
+        } else if !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "task".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn load_primitives_runtime(
+    artifact: &ExecutorArtifacts,
+    instruction: &str,
+    disabled_primitives: &[String],
+) -> Result<PrimitiveRuntime> {
+    let primitives_py_root = resolve_primitives_root()?;
+    let primitives_dir = primitives_py_root.join("primitives");
+    let bootstrap_path = primitives_py_root.join("bootstrap.py");
+    let has_runtime_files = primitives_dir.exists() && bootstrap_path.exists();
+    let disabled_set: std::collections::HashSet<String> = disabled_primitives
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    tracing::debug!(
+        disabled_primitives = ?disabled_set,
+        has_runtime_files,
+        "executor primitives runtime resolved"
+    );
+
+    let (catalog_slim, catalog_full) = if !has_runtime_files {
+        let msg = "### Available Code Primitives\n- unavailable: code_primitives runtime files are missing".to_string();
+        (msg.clone(), msg)
+    } else {
+        let functions = discover_primitive_functions(&primitives_dir, &disabled_set)?;
+        tracing::debug!(
+            discovered_count = functions.len(),
+            disabled_primitives = ?disabled_set,
+            "executor primitive discovery completed"
+        );
+        let selected = select_primitives_for_instruction(&functions, instruction);
+        if functions.is_empty() {
+            let msg =
+                "### Available Code Primitives\n- unavailable: no primitive functions discovered"
+                    .to_string();
+            (msg.clone(), msg)
+        } else {
+            (
+                render_catalog_slim(&selected, &disabled_set),
+                render_catalog_full(&selected, &disabled_set),
+            )
+        }
+    };
+
+    fs::write(&artifact.catalog_path, &catalog_full)?;
+
+    let mut disabled_primitives_sorted = disabled_set.into_iter().collect::<Vec<_>>();
+    disabled_primitives_sorted.sort();
+
+    Ok(PrimitiveRuntime {
+        catalog_slim,
+        primitives_py_root: primitives_py_root.exists().then_some(primitives_py_root),
+        bootstrap_path: bootstrap_path.exists().then_some(bootstrap_path),
+        disabled_primitives: disabled_primitives_sorted,
+    })
+}
+
+fn discover_primitive_functions(
+    dir: &PathBuf,
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> Result<Vec<PrimitiveFunction>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|v| v.to_str()) != Some("py") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default();
+        if matches!(name, "__init__.py" | "types.py" | "base.py" | "catalog.py") {
+            continue;
+        }
+        files.push(path);
+    }
+    files.sort();
+
+    let mut result = Vec::new();
+    for path in files {
+        let content = fs::read_to_string(&path)?;
+        result.extend(parse_primitive_file(&content, disabled_primitives));
+    }
+    Ok(result)
+}
+
+fn parse_primitive_file(
+    content: &str,
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> Vec<PrimitiveFunction> {
+    let def_re = Regex::new(
+        r"(?m)^async\s+def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([^:]+))?:",
+    )
+    .expect("valid regex");
+    let mut out = Vec::new();
+
+    for cap in def_re.captures_iter(content) {
+        let whole = if let Some(m) = cap.get(0) {
+            m
+        } else {
+            continue;
+        };
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        if name.starts_with('_') {
+            continue;
+        }
+        if disabled_primitives.contains(&name) {
+            continue;
+        }
+        let args = cap
+            .get(2)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
+        let ret = cap
+            .get(3)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
+        let signature = if ret.is_empty() {
+            format!("{name}({args})")
+        } else {
+            format!("{name}({args}) -> {ret}")
+        };
+        let doc = extract_docstring(content, whole.end());
+        let summary = extract_section_line(&doc, "[What it does]")
+            .or_else(|| first_non_empty_line(&doc))
+            .unwrap_or_default();
+        let output_contract = extract_contract_paths(&doc, "[Output Contract]").unwrap_or_default();
+        out.push(PrimitiveFunction {
+            name,
+            signature,
+            summary,
+            output_contract,
+        });
+    }
+    out
+}
+
+fn extract_docstring(content: &str, from: usize) -> String {
+    let remaining = &content[from..];
+    let trimmed = remaining.trim_start();
+    let delimiter = if trimmed.starts_with("\"\"\"") {
+        "\"\"\""
+    } else if trimmed.starts_with("'''") {
+        "'''"
+    } else {
+        return String::new();
+    };
+
+    let after_open = &trimmed[3..];
+    if let Some(idx) = after_open.find(delimiter) {
+        after_open[..idx].trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn first_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+fn extract_section_line(text: &str, section: &str) -> Option<String> {
+    let mut lines = text.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        if line.eq_ignore_ascii_case(section) {
+            return lines
+                .find(|candidate| !candidate.is_empty())
+                .map(ToString::to_string);
+        }
+    }
+    None
+}
+
+fn extract_contract_paths(text: &str, section: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].eq_ignore_ascii_case(section) {
+            i += 1;
+            let mut paths = Vec::new();
+            while i < lines.len() {
+                let line = lines[i];
+                if line.starts_with('[') && line.ends_with(']') {
+                    break;
+                }
+                if line.contains("res[\"") {
+                    let entry = if let Some(idx) = line.find(" #") {
+                        let code = line[..idx].trim();
+                        let comment = line[idx + 2..].trim();
+                        format!("{code} ({comment})")
+                    } else {
+                        line.to_string()
+                    };
+                    paths.push(entry);
+                }
+                i += 1;
+            }
+            if paths.is_empty() {
+                return None;
+            }
+            return Some(paths.join("; "));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn render_catalog_slim(
+    functions: &[PrimitiveFunction],
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> String {
+    let mut out = String::from("### Available Code Primitives\n");
+    if !disabled_primitives.is_empty() {
+        let mut disabled = disabled_primitives.iter().cloned().collect::<Vec<_>>();
+        disabled.sort();
+        out.push_str(&format!(
+            "- note: disabled via config: {}\n\n",
+            disabled.join(", ")
+        ));
+    }
+    for f in functions {
+        out.push_str(&format!("- {}", f.name));
+        if !f.summary.is_empty() {
+            out.push_str(&format!(
+                ": {}",
+                compact_inline(&f.summary, MAX_SUMMARY_CHARS)
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_catalog_full(
+    functions: &[PrimitiveFunction],
+    disabled_primitives: &std::collections::HashSet<String>,
+) -> String {
+    let mut out = String::from("### Available Code Primitives\n");
+    if !disabled_primitives.is_empty() {
+        let mut disabled = disabled_primitives.iter().cloned().collect::<Vec<_>>();
+        disabled.sort();
+        out.push_str(&format!(
+            "- note: disabled via config: {}\n\n",
+            disabled.join(", ")
+        ));
+    }
+    for f in functions {
+        out.push_str(&format!(
+            "- `{}`\n",
+            compact_inline(&f.signature, MAX_SIGNATURE_CHARS)
+        ));
+        if !f.summary.is_empty() {
+            out.push_str(&format!(
+                "  use: {}\n",
+                compact_inline(&f.summary, MAX_SUMMARY_CHARS)
+            ));
+        }
+        if !f.output_contract.is_empty() {
+            out.push_str(&format!(
+                "  output_contract: {}\n",
+                compact_inline(&f.output_contract, MAX_CONTRACT_CHARS)
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn read_non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn resolve_primitives_root() -> Result<PathBuf> {
+    if let Some(path) = read_non_empty_env(PRIMITIVES_ROOT_ENV) {
+        return Ok(crate::config::resolve_path(&path));
+    }
+
+    let cwd = std::env::current_dir()?;
+    let local_root = cwd.join(PRIMITIVES_ROOT);
+    if local_root.exists() {
+        return Ok(local_root);
+    }
+
+    Ok(PathBuf::from(DEFAULT_SYSTEM_PRIMITIVES_ROOT))
+}
+
+fn select_primitives_for_instruction(
+    functions: &[PrimitiveFunction],
+    instruction: &str,
+) -> Vec<PrimitiveFunction> {
+    if functions.len() <= MAX_PRIMITIVES_IN_PROMPT {
+        return functions.to_vec();
+    }
+
+    let lower = instruction.to_lowercase();
+    let has_url_intent = lower.contains("http")
+        || lower.contains("url")
+        || lower.contains("网页")
+        || lower.contains("页面")
+        || lower.contains("blog")
+        || lower.contains("fetch")
+        || lower.contains("抓取");
+    let has_search_intent = lower.contains("search")
+        || lower.contains("find")
+        || lower.contains("查找")
+        || lower.contains("搜索");
+    let has_summary_intent = lower.contains("summary")
+        || lower.contains("summarize")
+        || lower.contains("总结")
+        || lower.contains("正文")
+        || lower.contains("main content");
+
+    let mut scored: Vec<(i32, PrimitiveFunction)> = functions
+        .iter()
+        .cloned()
+        .map(|f| {
+            let mut score = 0;
+            let name = f.name.as_str();
+            if lower.contains(name) {
+                score += 6;
+            }
+            if has_url_intent && name.contains("scrape") {
+                score += 4;
+            }
+            if has_search_intent && name.contains("search") {
+                score += 4;
+            }
+            if has_summary_intent && name.contains("extract_main_text") {
+                score += 3;
+            }
+            if score == 0 {
+                score = 1;
+            }
+            (score, f)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    scored
+        .into_iter()
+        .take(MAX_PRIMITIVES_IN_PROMPT)
+        .map(|(_, f)| f)
+        .collect()
+}
+
+fn compact_inline(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut out = String::new();
+    for ch in normalized.chars() {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out}...")
 }

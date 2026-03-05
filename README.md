@@ -181,6 +181,26 @@ command = "npx"
 args = ["-y", "@scope/server"]
 ```
 
+### 🔍 Document Search
+
+Zerda supports semantic search over its own project documentation via the `search_zerda_documents` tool, enabling the Agent to look up configuration guides, command references, and architectural details on demand.
+
+**Currently supported backend: [Cloudflare AutoRAG (AI Search)](https://developers.cloudflare.com/autorag/)**
+
+Setup:
+
+1. Upload the documentation files from `docs/zerda/` to a Cloudflare R2 bucket.
+2. Create an AutoRAG instance in the Cloudflare dashboard linked to that R2 bucket.
+3. Create a Cloudflare API Token with **Account → AI Search Index Engine → Run** permission.
+4. Set the following environment variables:
+   ```env
+   CF_AI_SEARCH_ACCOUNT_ID=<your-account-id>
+   CF_AI_SEARCH_API_TOKEN=<your-api-token>
+   CF_AI_SEARCH_INSTANCE_NAME=<your-autorag-instance-name>
+   ```
+
+When all three variables are present, the `search_zerda_documents` tool is automatically registered. If any variable is missing, the tool is silently skipped.
+
 ---
 
 ## 🧬 Technical Design
@@ -190,15 +210,91 @@ args = ["-y", "@scope/server"]
 
 ### KV-Cache Friendly Architecture
 
-Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, user context) is injected only at the tail of the user message, never into the system prompt. The built-in tool definition list (`shell → read → write → reload → memory → skill → todo → …`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
+Zerda's system prompt is fully static — identity, rules, and environment metadata are baked in at build time. All dynamic content (timestamps, task state, memory recall context) is injected only at the tail of the user message, never into the system prompt. In the Planner loop, the built-in tool definition list (`reload → skill → todo → tts → delegate_to_executor`) is order-locked and never mutated at runtime, preventing tool-definition hash changes from invalidating the prefix cache. Conversation history follows an append-only discipline: messages are never retroactively edited — the history is only truncated from the head or appended at the tail, maximizing KV-cache prefix hits.
+
+### Planner-Executor Decoupling
+
+Zerda has migrated from a monolithic ReAct loop to a dual-agent Planner-Executor architecture. The Planner focuses on intent understanding, task decomposition, and final synthesis, while the Executor focuses on environment interaction and mechanical execution. This hard separation significantly reduces direct low-level tool traces in the Planner's context and keeps high-level reasoning cleaner over long multi-turn sessions.
+
+The split also improves concurrency scaling characteristics. In practice, a Planner can fan out multiple independent execution nodes while keeping one clean reasoning thread. With horizontally scalable Executor workers, task fan-out can grow much faster than in a single mixed ReAct loop, without proportionally polluting the Planner context.
+
+### Compiler Pattern (Intent Compilation)
+
+Between Planner and Executor, Zerda applies a Compiler Pattern: the Planner acts as a front-end compiler that translates verbose, ambiguous user requests and environmental context into high-density structured instructions before passing them to the Executor. Instructions follow the form `ACTION(params) -> {return_fields}` — a compact, machine-readable format that eliminates narrative overhead and makes the Executor's job unambiguous.
+
+This mirrors how a compiler transforms human-readable source code into optimized intermediate representation: the Planner absorbs context, resolves ambiguity, and emits a minimal instruction that the weaker Executor model can follow reliably. The result is fewer wasted tokens on verbose delegation briefs, lower error rates from the Executor misinterpreting intent, and a clean separation between "understanding what to do" (Planner) and "doing it" (Executor).
+
+### Programmatic Tool Calling (PTC)
+
+Instead of repeatedly composing shell heredoc payloads in-context, the Executor uses programmatic tool calling for compute pushdown. The `execute_python_script` tool accepts pure Python code in a structured field, writes/runs scripts in a managed artifact directory, and returns standardized execution status plus compact findings. This converts many multi-step tool chains into one bounded execution block and reduces tool-call chatter in the main loop.
+
+### Prewritten Primitive Layer (Code Primitives)
+
+On top of PTC, Zerda adds a prewritten primitive layer: frequently used, failure-prone, and reusable environment interactions are implemented as async Python functions and injected into the Executor runtime for direct `await` calls. This reduces ad-hoc script assembly and field-path guessing failures.
+
+Primitives follow a strict shared contract: `status/data/error_code/error_message/retryable`, and each primitive docstring defines an explicit `[Output Contract]` with success criteria and key field paths. For Firecrawl-oriented primitives, responses are normalized for flat access first (for example `data.markdown`, `data.html`, `data.metadata`, `data.results`) while preserving a compatible raw upstream payload field for backward compatibility.
+
+This layer decouples tool capability from task-level scripting: primitives own argument validation, timeout/retry policy, error typing, and telemetry persistence; the model focuses on orchestration and business logic. For compatibility, complex conditional constraints are enforced in runtime checks rather than pushed into top-level tool schemas.
+
+### Lightweight Relational-Hybrid Memory ([MemBurrow](https://github.com/Mgrsc/MemBurrow))
+
+Zerda integrates a lightweight external memory service ([MemBurrow](https://github.com/Mgrsc/MemBurrow)) to address practical failure modes in long-running agent sessions:
+
+- Repeated context replay: preserving preferences/rules by replaying long histories inflates token cost.
+- Retrieval correctness drift: vector-only recall may return semantically similar but operationally wrong memories.
+- Constraint loss: hard rules and user preferences are easy to miss in pure similarity search.
+- Recall fragility: when vector infrastructure degrades, memory injection becomes unstable.
+
+The memory pipeline mitigates these issues with several design choices:
+
+1. SQL as source of truth, vector as acceleration index.
+2. Intent-aware routing: rule/preference/constraint-style intents go SQL-first; other intents use hybrid recall.
+3. Outbox-based async ingest: API returns quickly while extraction/embedding/indexing run in background workers.
+4. Multi-factor rerank: semantic relevance, importance, confidence, freshness, and scope.
+5. Graceful degradation and repair: SQL fallback when vector search fails, plus periodic reconciliation to reduce SQL-vector drift.
+
+For Zerda, this reduces prompt bloat from history replay, improves retention of actionable constraints, and keeps recall behavior stable under partial dependency failures.
+
+### Executor Reflection Memory Loop (Heuristic)
+
+Zerda implements a heuristic executor reflection memory loop that is conceptually inspired by ACON (Agent Context Optimization). The goal is to shift memory usage from "feeding more task facts" to "feeding reusable methodology and lessons" (`How to act / What to avoid`). Before an execution run, the system embeds the delegated instruction, retrieves top-matched historical guidelines from Qdrant, and injects them into the Executor prompt as concise system reminders.
+
+Configuration note: all reflection settings live under `[reflection]` (for example `llm_model`, `max_tokens`, `embedding_model`, `embedding_dim`). Both `llm_model` and `embedding_model` use `provider_id@model_name` and resolve `base_url` / `api_key` from `[providers.<id>]`. `embedding_model` is optional and defaults to the same provider as `llm_model` with `text-embedding-3-small`. Reflection sampling is fixed at `temperature=0.7` and `top_p=0.95`.
+
+During execution, Zerda records iteration outcomes (tool errors and traceback signals). After the run, a reflection worker asynchronously performs failure-driven contrast: it compares failed and successful iterations from the same trajectory, then compresses one reusable guideline in imperative form. The compression prompt explicitly enforces method-level lessons (not domain facts), short output, and generalizability to similar tasks.
+
+Extracted guidelines are written back into a vector store and become reusable priors for future similar instructions. Zerda also includes a negative-feedback guardrail: if a run still ends in failure after guideline injection, those injected guideline entries are removed to avoid reinforcing unhelpful heuristics.
+
+Scope note: this is not the full ACON research pipeline from the paper. Zerda currently focuses on online executor guidance memory and does not implement the paper's full offline UT/CO optimization workflow, dedicated history/observation compressor training loop, or compressor/agent distillation pipeline.
+
+### Context Rot Resistance
+
+The architecture explicitly mitigates Context Rot. Mechanical failures, stack traces, and retry noise are retained in Executor artifacts/logs, while the Planner receives reduced, decision-grade outputs. When evidence is sufficient (including negative evidence such as empty link sets), the Planner can converge immediately; when evidence is insufficient, the Planner can re-decompose the task with a fresh local strategy without inheriting excessive execution residue.
+
+### Empirical Token Efficiency
+
+In the website-investigation samples under `example-docs/some-file/`, the Planner-Executor + PTC workflow showed substantial token reduction versus the prior direct-tooling path.
+
+| Metric | Traditional ReAct (single loop) | Planner-Executor + PTC |
+| :--- | :--- | :--- |
+| Tool trace exposure in main context | High | Low |
+| Mechanical error noise in main context | High | Mostly isolated to Executor artifacts |
+| Typical tool-call chain length | Longer, chatty | Compressed into bounded execution blocks |
+| Token usage (round-1 sample) | Baseline | ~80% lower in observed sample |
+| Multi-turn stability | Degrades faster as traces accumulate | More stable due to strategy/execution separation |
+
+This table reflects an initial first-round test and sample observation, not a universal benchmark. Actual gains vary by task shape, tool fan-out, and output verbosity.
+For sustained multi-round tool usage, traditional ReAct often experiences faster context expansion because reasoning, execution traces, retries, and diagnostics co-reside in one thread; Planner-Executor keeps most execution residue in Executor artifacts/logs, so Planner context tends to grow slower and remain more stable.
 
 ### File System Context
 
-Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. The model re-accesses the full content on demand via `shell` / `read` tools (read-on-demand), avoiding upfront context bloat. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
+Large files (>10 MB) are never loaded in full; the tool returns a head/tail preview plus a file-path pointer. When any tool output exceeds `max_tool_output_chars`, the overflow is spilled to a temporary file and only the path reference is kept in context. Executor artifacts are persisted under `~/.zerda/executor_jobs/<YYYYMMDD>/<HHMMSS>_<task_slug>/` with separated script/log/result/meta files, which makes replay and postmortem analysis deterministic while minimizing Planner context pollution. During automatic compaction, the complete transcript is persisted to `memory/compaction/`; the resulting summary retains a recovery path so the model can trace back to the original content at any time — lossless recoverability with zero immediate inference overhead.
 
 ### ToDo Recitation
 
 In long sessions, models are susceptible to the "Lost in the Middle" effect and attention-basin bias, causing attention to drop for instructions positioned in the middle of the context. To counteract this, `TodoTool` maintains a session-scoped task list. Each time a user turn is assembled, `pending_reminder()` automatically injects the outstanding items near the end of the user message. This continuously pushes global objectives into the model's recency attention window, enforcing periodic review and resisting attention collapse.
+
+Beyond attention anchoring, `TodoTool` doubles as the task orchestration backbone for complex requests. The Planner decomposes multi-step work via `todo(add)`, delegates each sub-task with a compiled instruction, and marks `todo(done)` upon completion — forming an auditable execution trace. `TodoTool` is concurrent-safe (internally `Mutex`-protected), allowing batch creation in a single iteration; a typical 4-subtask workflow completes in ~6 iterations.
 
 ### Keep the Errors
 
@@ -206,11 +302,11 @@ Zerda does not scrub failed actions or tool errors. Every tool result, including
 
 ### Segmented Content Isolation
 
-Mixing information from multiple sources into a single text block leads to "Instruction Dilution," where different semantics pollute each other. Zerda structures the `content` field of the user message as an array of independent text blocks: `[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`. Each block is semantically self-contained and can be added or removed without affecting the integrity of others. Safety directives are injected as a standalone block for repeated reinforcement.
+Mixing information from multiple sources into a single text block leads to "Instruction Dilution," where different semantics pollute each other. Zerda structures the `content` field of the user message as an array of independent text blocks: `[skills_index, todo_reminder, memory_recall, conversation_summary, timestamp, user_input]`. Each block is semantically self-contained and can be added or removed without affecting the integrity of others. Safety directives are injected as a standalone block for repeated reinforcement.
 
 ### System/User Prompt Layering (Experimental)
 
-The prompt architecture is split into two layers. The **system prompt** serves as a static kernel: identity (role anchoring) → rules (negation-first constraints) → env (structured tags). The **user prompt** acts as a dynamic shell: `<system-reminder>` tags deliver elevated reminders, and content blocks are assembled dynamically based on the model's current phase (explore / plan / execute). Negation constraints (`NEVER` / `DO NOT`) are front-loaded to establish hard boundaries; structured tags (`<env>`, `<user-context>`) enable precise extraction. The identity text occupies the very first position in the system prompt — the opening sentence anchors the role, and all subsequent rules orbit around it.
+The prompt architecture is split into two layers. The **system prompt** serves as a static kernel: identity (role anchoring) → rules (negation-first constraints) → env (structured tags). The **user prompt** acts as a dynamic shell: `<system-reminder>` tags deliver elevated reminders, and content blocks are assembled dynamically based on the model's current phase (explore / plan / execute). Negation constraints (`NEVER` / `DO NOT`) are front-loaded to establish hard boundaries; structured tags (`<env>`, `<memory-recall>`) enable precise extraction. The identity text occupies the very first position in the system prompt — the opening sentence anchors the role, and all subsequent rules orbit around it.
 
 </details>
 

@@ -16,7 +16,10 @@ static ENV_INFO: LazyLock<EnvInfo> = LazyLock::new(|| EnvInfo {
     package_manager: detect_package_manager(),
 });
 
-pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&str>) -> String {
+pub fn build_system_prompt_parts(
+    identity: Option<&str>,
+    channel_supplement: Option<&str>,
+) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(id) = identity {
@@ -25,6 +28,30 @@ pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&s
 
     parts.push(SYSTEM_RULES.trim_end().to_string());
 
+    parts.push(build_env_block());
+
+    if let Some(supplement) = channel_supplement {
+        parts.push(supplement.to_string());
+    }
+
+    let prompt_len =
+        parts.iter().map(String::len).sum::<usize>() + (parts.len().saturating_sub(1) * 2);
+    tracing::trace!(
+        "System prompt parts: {}, total size: {} chars",
+        parts.len(),
+        prompt_len
+    );
+    if prompt_len > config::MAX_PROMPT_CHARS {
+        tracing::warn!(
+            "System prompt exceeds {} chars ({} chars)",
+            config::MAX_PROMPT_CHARS,
+            prompt_len
+        );
+    }
+    parts
+}
+
+fn build_env_block() -> String {
     let hostname = std::env::var("HOSTNAME")
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
         .unwrap_or_else(|_| "unknown".to_string());
@@ -43,22 +70,7 @@ pub fn build_system_prompt(identity: Option<&str>, channel_supplement: Option<&s
         env_block.push_str(&format!("\npackage_manager: {}", env.package_manager));
     }
     env_block.push_str("\n</env>");
-    parts.push(env_block);
-
-    if let Some(supplement) = channel_supplement {
-        parts.push(supplement.to_string());
-    }
-
-    let prompt = parts.join("\n\n");
-    tracing::trace!("System prompt size: {} chars", prompt.len());
-    if prompt.len() > config::MAX_PROMPT_CHARS {
-        tracing::warn!(
-            "System prompt exceeds {} chars ({} chars)",
-            config::MAX_PROMPT_CHARS,
-            prompt.len()
-        );
-    }
-    prompt
+    env_block
 }
 
 pub(crate) fn read_os_pretty_name() -> String {

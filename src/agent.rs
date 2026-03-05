@@ -65,9 +65,18 @@ impl Agent {
         }
     }
 
-    pub fn set_system_prompt(&mut self, prompt: String) {
+    pub fn set_system_prompt_parts(&mut self, parts: Vec<String>) {
         self.history.retain(|m| !matches!(m.role, Role::System));
-        self.history.insert(0, ConversationMessage::system(prompt));
+        self.history.insert(
+            0,
+            ConversationMessage {
+                role: Role::System,
+                content: parts.into_iter().map(ContentPart::Text).collect(),
+                tool_calls: Vec::new(),
+                reasoning_content: None,
+                thinking_blocks: Vec::new(),
+            },
+        );
     }
 
     pub fn push_user_message(&mut self, text: String) {
@@ -350,6 +359,7 @@ impl Agent {
         let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
         let mut tool_starts: Vec<(String, String, Option<serde_json::Value>)> = Vec::new();
         let mut tool_args: HashMap<String, String> = HashMap::new();
+        let mut last_tool_call_id: Option<String> = None;
         let mut usage = Usage::default();
 
         while let Some(event) = stream.next().await {
@@ -363,11 +373,45 @@ impl Agent {
                     name,
                     extra_content,
                 } => {
-                    tool_starts.push((id.clone(), name, extra_content));
-                    tool_args.entry(id).or_default();
+                    let resolved_id = if id.trim().is_empty() {
+                        let generated_id = format!("tool_call_auto_{}", tool_starts.len());
+                        tracing::warn!(
+                            generated_id = %generated_id,
+                            "ToolCallStart event missing id; generated fallback id"
+                        );
+                        generated_id
+                    } else {
+                        id
+                    };
+                    last_tool_call_id = Some(resolved_id.clone());
+                    tool_starts.push((resolved_id.clone(), name, extra_content));
+                    tool_args.entry(resolved_id).or_default();
                 }
                 StreamEvent::ToolCallDelta { id, args_chunk } => {
-                    tool_args.entry(id).or_default().push_str(&args_chunk);
+                    let resolved_id = if id.trim().is_empty() {
+                        match last_tool_call_id.clone() {
+                            Some(last_id) => {
+                                tracing::debug!(
+                                    fallback_tool_call_id = %last_id,
+                                    "ToolCallDelta event missing id; falling back to last started tool call id"
+                                );
+                                last_id
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "ToolCallDelta event missing id and no previous tool call id is available; dropping args chunk"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        id
+                    };
+                    last_tool_call_id = Some(resolved_id.clone());
+                    tool_args
+                        .entry(resolved_id)
+                        .or_default()
+                        .push_str(&args_chunk);
                 }
                 StreamEvent::AssistantMeta(meta) => {
                     let kind = meta.get("kind").and_then(serde_json::Value::as_str);
@@ -506,8 +550,7 @@ impl Agent {
                     self.temp_files.push(path.clone());
                     format!(
                         "[Tool output too large ({len} chars), saved to {path}. \
-                         Use `shell` with grep/head/tail to search or extract specific sections, \
-                         or use `subagent` with this file_path to read and process the full content.]",
+                         Use `delegate_to_executor` and pass this file path in the instruction for deep processing.]",
                         path = path.display()
                     )
                 }
@@ -638,7 +681,7 @@ impl Agent {
 
         let compaction_hint = format!(
             "\n\nThe full conversation transcript before compaction was saved to: {path}\n\
-             To retrieve specific details, use the `subagent` tool with file_path or use `shell` with grep/head/tail to search the file. Do NOT read the entire file.",
+             To retrieve specific details, use `delegate_to_executor` and include this file path in the instruction. Do NOT inline the entire file in planner context.",
             path = compaction_path.display()
         );
 

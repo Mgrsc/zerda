@@ -44,9 +44,16 @@ impl OpenAiChatProvider {
         for msg in messages {
             match &msg.role {
                 Role::System => {
+                    let content = build_openai_content_parts(
+                        &msg.content,
+                        "text",
+                        "image_url",
+                        "image_url",
+                        true,
+                    );
                     api_messages.push(json!({
                         "role": "system",
-                        "content": msg.text_content()
+                        "content": content
                     }));
                 }
                 Role::User => {
@@ -458,7 +465,11 @@ fn parse_openai_chat_stream_chunk(
                     tc.get("index").and_then(Value::as_u64).map(|i| i as usize)
                 {
                     index
-                } else if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                } else if let Some(id) = tc
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
                     tool_calls_map
                         .iter()
                         .find_map(|(idx, pending)| {
@@ -473,23 +484,31 @@ fn parse_openai_chat_stream_chunk(
                     tracing::debug!(
                         fallback_index,
                         resolved_index = index,
-                        has_id = tc.get("id").and_then(|v| v.as_str()).is_some(),
+                        has_id = tc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|v| !v.is_empty()),
                         "OpenAI Chat stream tool_call missing index; applying compatibility fallback"
                     );
                 }
 
                 let pending = tool_calls_map.entry(index).or_default();
 
-                if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                if let Some(id) = tc
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
                     pending.id = Some(id.to_string());
                     if pending.name.is_none() {
-                        let initial_name = tc
+                        if let Some(initial_name) = tc
                             .get("function")
                             .and_then(|f| f.get("name"))
                             .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        pending.name = Some(initial_name);
+                            .filter(|name| !name.is_empty())
+                        {
+                            pending.name = Some(initial_name.to_string());
+                        }
                     }
                 }
                 if let Some(extra_content) = tc.get("extra_content") {
@@ -500,6 +519,7 @@ fn parse_openai_chat_stream_chunk(
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
                 {
                     pending.name = Some(name.to_string());
                 }

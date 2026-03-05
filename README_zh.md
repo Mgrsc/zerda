@@ -181,6 +181,26 @@ command = "npx"
 args = ["-y", "@scope/server"]
 ```
 
+### 🔍 文档搜索
+
+Zerda 通过 `search_zerda_documents` 工具支持对自身项目文档的语义搜索，使 Agent 能够按需查阅配置指南、命令参考和架构说明。
+
+**当前支持的后端：[Cloudflare AutoRAG (AI Search)](https://developers.cloudflare.com/autorag/)**
+
+配置步骤：
+
+1. 将 `docs/zerda/` 目录下的文档文件上传到 Cloudflare R2 存储桶。
+2. 在 Cloudflare 控制台创建一个 AutoRAG 实例并关联该 R2 存储桶。
+3. 创建 Cloudflare API Token，权限选择 **Account → AI Search Index Engine → Run**。
+4. 设置以下环境变量：
+   ```env
+   CF_AI_SEARCH_ACCOUNT_ID=<你的账户ID>
+   CF_AI_SEARCH_API_TOKEN=<你的API Token>
+   CF_AI_SEARCH_INSTANCE_NAME=<你的AutoRAG实例名>
+   ```
+
+三个变量全部设置后，`search_zerda_documents` 工具会自动注册。缺少任一变量时，该工具将被静默跳过，不会报错。
+
 ---
 
 ## 🧬 技术设计
@@ -190,15 +210,91 @@ args = ["-y", "@scope/server"]
 
 ### KV-Cache 友好架构
 
-Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、用户上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。内置工具定义列表（`shell → read → write → reload → memory → skill → todo → …`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
+Zerda 的系统提示词（System Prompt）完全静态化——identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、记忆召回上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词（System Prompt）。在 Planner 主循环中，内置工具定义列表（`reload → skill → todo → tts → delegate_to_executor`）顺序锁定，运行时不增删，防止工具定义哈希（Tool Definitions Hash）变化导致前缀缓存失效。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
+
+### Planner-Executor 解耦架构
+
+Zerda 已从单体 ReAct 循环迁移为双智能体架构。Planner 负责意图理解、任务降维拆解与最终综合；Executor 负责环境交互与机械执行。通过策略层与执行层的物理隔离，主链路上下文中低层工具噪声显著减少，长对话下高维推理稳定性更好。
+
+该分层同时改善了并发扩展特性。工程上，Planner 可以扇出多个相互独立的执行节点，同时保持单一且清洁的高层推理线程。配合可横向扩展的 Executor worker，任务扇出速度可显著高于单体 ReAct 回路，而不会同比例污染主脑上下文。
+
+### 编译器模式（Compiler Pattern）
+
+在 Planner 与 Executor 之间，Zerda 引入了编译器模式（Compiler Pattern）：Planner 充当前端编译器，将用户冗杂的自然语言请求和环境反馈"编译"为高密度结构化指令后再传递给 Executor。指令采用 `ACTION(params) -> {return_fields}` 格式——紧凑、机器可读，消除叙述性开销，使 Executor 的执行目标无歧义化。
+
+这与编译器将人类可读源码转换为优化中间表示（IR）的过程同构：Planner 吸收上下文、消解歧义，输出一条最小化指令；能力较弱的 Executor 模型只需忠实执行即可。效果是：委托阶段的 token 浪费大幅降低，Executor 误读意图的错误率下降，"理解做什么"（Planner）与"执行怎么做"（Executor）的职责分离更加彻底。
+
+### 程序化工具调用（PTC）
+
+Executor 采用程序化工具调用（PTC）进行计算下推。`execute_python_script` 以结构化字段接收纯 Python 代码，自动完成脚本落盘、执行、日志与结果输出，并返回标准化状态。这样可把原本多步工具链压缩为单个受控执行块，减少主循环中的工具调用冗余。
+
+### 预写原语层（Code Primitives）
+
+在 PTC 之上，Zerda 增加了“预写原语”机制：将高频、易错、可复用的环境交互预先实现为 Python 异步函数，并在 Executor 运行时注入给模型直接 `await` 调用。该层用于降低临时脚本拼装成本与字段路径猜测错误。
+
+当前原语遵循统一契约：固定返回 `status/data/error_code/error_message/retryable`，并在 docstring 中显式声明 `[Output Contract]` 的成功判定和关键字段路径。对于 Firecrawl 类原语，返回结构采用扁平化优先（例如 `data.markdown`、`data.html`、`data.metadata`、`data.results` 可直接访问），同时保留上游原始 payload 兼容字段，兼顾稳定读取与向后兼容。
+
+这一层本质上把“工具能力”与“任务级代码”解耦：原语负责参数校验、超时重试、错误分类和遥测落盘；模型只需组合调用顺序与业务逻辑。对应地，复杂条件约束尽量在运行时代码中校验，避免把不兼容的复杂 schema 直接压给模型侧工具定义。
+
+### 轻量关系型混合记忆系统（[MemBurrow](https://github.com/Mgrsc/MemBurrow)）
+
+Zerda 引入了轻量外部记忆服务 [MemBurrow](https://github.com/Mgrsc/MemBurrow)，主要解决长会话 Agent 在生产环境中的四类问题：
+
+- 上下文反复回放：为了保留偏好与规则而反复喂长历史，导致 token 成本持续膨胀。
+- 召回正确性漂移：仅靠向量相似度会召回“语义相近但操作上不正确”的记忆。
+- 硬约束丢失：纯语义检索容易漏掉规则、偏好、安全约束等高优先信息。
+- 召回链路脆弱：向量层波动时，记忆注入稳定性明显下降。
+
+该记忆管线通过以下设计进行缓解：
+
+1. SQL 作为事实真相层，向量层作为语义加速索引。
+2. 意图路由：规则/偏好/约束类请求走 SQL-first，其它请求走混合召回。
+3. Outbox 异步写入：API 快速返回，抽取/嵌入/索引在后台 worker 处理。
+4. 多因子重排：综合语义相关性、重要度、置信度、新鲜度、作用域。
+5. 优雅降级与修复：向量检索失败时回退 SQL，并通过周期性 reconciliation 降低 SQL-向量漂移。
+
+对 Zerda 的直接收益是：减少历史回放造成的提示词膨胀，提升可执行约束的保留率，并在部分依赖异常时保持更稳定的记忆召回行为。
+
+### Executor 启发式反思记忆闭环
+
+Zerda 在 Executor 路径实现的是启发式反思记忆闭环，核心思想参考了 ACON（Agent Context Optimization），但不是 ACON 的完整实现。目标是把记忆优化从“持续喂任务知识”转为“沉淀可复用的方法论与教训”（`How to act / What to avoid`）。每次执行前，系统会对委托指令做向量化检索，从 Qdrant 召回最相似的历史指南，并以精简的 `<system-reminder>` 注入到 Executor 提示词中。
+
+配置说明：反思相关配置全部放在 `[reflection]` 下（如 `llm_model`、`max_tokens`、`embedding_model`、`embedding_dim`）。`llm_model` 与 `embedding_model` 都使用 `provider_id@model_name`，其 `base_url` / `api_key` 统一从 `[providers.<id>]` 读取。`embedding_model` 可省略，默认使用 `llm_model` 的同一 provider，并使用 `text-embedding-3-small` 作为默认 embedding 模型名。反思采样参数固定为 `temperature=0.7`、`top_p=0.95`。
+
+执行过程中，系统按迭代记录工具错误和 traceback 信号。执行结束后，异步反思任务会做失败驱动对比：在同一轨迹内对照失败迭代与成功迭代，压缩出一条可迁移的操作指南。压缩提示词强约束输出为方法级经验（非领域事实）、短文本、祈使句，并要求可泛化到相似任务。
+
+提炼后的指南会写回向量库，作为后续相似指令的先验。系统同时包含负反馈回收机制：若注入指南后任务最终仍失败，会删除本轮注入的指南条目，避免无效经验在后续任务中被持续放大。
+
+边界说明：该实现不是论文中完整的 ACON 流水线。Zerda 当前聚焦在线 Executor 指导记忆，不包含论文里的完整离线 UT/CO 优化流程、专用 history/observation 压缩器训练链路，以及 compressor/agent 蒸馏流水线。
+
+### 抗上下文腐败（Context Rot）
+
+该架构针对 Context Rot 做了显式设计：异常栈、重试细节、机械噪声主要沉淀在 Executor 工件与日志中，Planner 仅接收决策级结果。在线索已充分时（包括 `links=[]` 这类负信息证据）可直接收敛；在线索不足时，再由 Planner 重置局部策略并分配新任务节点，避免在复杂任务中过早收敛。
+
+### Token 效率观测
+
+在 `example-docs/some-file/` 的网站调查样本对比中，Planner-Executor + PTC 相比旧的直接工具路径表现出显著降耗。
+
+| 指标 | 传统 ReAct（单回路） | Planner-Executor + PTC |
+| :--- | :--- | :--- |
+| 主上下文中的工具轨迹暴露 | 高 | 低 |
+| 主上下文中的机械报错噪声 | 高 | 主要隔离在 Executor 工件 |
+| 典型工具链长度 | 更长、更碎 | 压缩为受控执行块 |
+| Token 消耗（首轮样本） | 基线 | 样本观测约下降 80% |
+| 多轮稳定性 | 轨迹累积后更快劣化 | 策略/执行分离后更稳定 |
+
+以上表格属于初始第一轮测试与样本观测结果，不是通用基准。实际收益会随任务形态、工具扇出和输出长度而变化。
+在持续多轮工具调用场景下，传统 ReAct 往往因推理、执行、重试和诊断信息共线累积而更快膨胀上下文；Planner-Executor 将大部分执行残留沉淀在 Executor 工件/日志中，因此 Planner 上下文增速通常更慢、稳定性更高。
 
 ### 文件系统上下文
 
-大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。模型按需通过 `shell` / `read` 工具重新读取完整内容（按需读取，Read-on-Demand），避免预载造成的上下文膨胀。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
+大文件（>10 MB）从不全量加载，工具仅返回头尾预览和文件路径指针。当任意工具输出超过 `max_tool_output_chars` 阈值时，溢出内容写入临时文件，上下文中只保留路径引用。Executor 工件采用分层目录持久化：`~/.zerda/executor_jobs/<YYYYMMDD>/<HHMMSS>_<task_slug>/`，脚本/日志/结果/元数据分离，便于复盘且降低主链路上下文污染。自动压缩时，完整对话转录持久化到 `memory/compaction/` 目录，摘要中保留恢复路径，模型可随时追溯原始内容——在零即时推理开销下实现无损可恢复性。
 
 ### ToDo Recitation（待办事项背诵）
 
-长会话中，模型易受“迷失在中间（Lost in the Middle）”效应和注意力盆地（Attention Basin）偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个会话级（Session-Scoped）待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入用户消息（User Message）靠近末端的位置。这一机制持续将全局目标推入模型的近因偏好（Recency Bias）注意力窗口，强制周期性复习，有效对抗注意力坍缩。
+长会话中，模型易受”迷失在中间（Lost in the Middle）”效应和注意力盆地（Attention Basin）偏差影响，对位于上下文中部的指令关注度显著下降。为此，`TodoTool` 维护一个会话级（Session-Scoped）待办列表，每轮用户消息构建时通过 `pending_reminder()` 将未完成事项自动注入用户消息（User Message）靠近末端的位置。这一机制持续将全局目标推入模型的近因偏好（Recency Bias）注意力窗口，强制周期性复习，有效对抗注意力坍缩。
+
+除了注意力锚定，`TodoTool` 同时承担复杂任务的编排职责。面对多步请求时，Planner 先通过 `todo(add)` 分解子任务，再逐个以编译后指令 delegate 给 Executor，每完成一个即 `todo(done)` 标记，形成可审计的执行轨迹。`TodoTool` 内部 `Mutex` 保护，支持单次迭代批量创建，典型 4 子任务工作流约 6 次迭代完成。
 
 ### Keep the Errors（保留错误现场）
 
@@ -206,11 +302,11 @@ Zerda 不会清理失败动作（Failed Actions）和工具报错（Tool Errors�
 
 ### Segmented Content Isolation（分段式内容隔离）
 
-多来源信息混入同一文本块会导致提示词稀释（Instruction Dilution），不同语义相互污染。Zerda 将用户消息（User Message）的 `content` 字段组织为独立文本块（Text Block）数组：`[skills_index, todo_reminder, user_context, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
+多来源信息混入同一文本块会导致提示词稀释（Instruction Dilution），不同语义相互污染。Zerda 将用户消息（User Message）的 `content` 字段组织为独立文本块（Text Block）数组：`[skills_index, todo_reminder, memory_recall, conversation_summary, timestamp, user_input]`。各块语义独立，可按需增删而不影响其他块的完整性。安全准则作为独立块注入，实现反复强化。
 
 ### System/User Prompt Layering（提示词分层架构）(Experimental)
 
-提示词架构分为两层。**系统提示词（System Prompt）** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**用户提示词（User Prompt）** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，内容块（Content Block）根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<user-context>`）便于精准提取。identity 文本位于系统提示词（System Prompt）的最前位，首句锚定身份，后续所有规则围绕该身份展开。
+提示词架构分为两层。**系统提示词（System Prompt）** 作为静态内核：identity（角色锚定）→ rules（否定式约束前置）→ env（结构化标签）。**用户提示词（User Prompt）** 作为动态外壳：通过 `<system-reminder>` 标签实现越级提醒，内容块（Content Block）根据模型当前阶段（探索 / 规划 / 执行）动态组装。否定式约束（`NEVER` / `DO NOT`）前置以划定硬性禁区；结构化标签（`<env>`、`<memory-recall>`）便于精准提取。identity 文本位于系统提示词（System Prompt）的最前位，首句锚定身份，后续所有规则围绕该身份展开。
 
 </details>
 

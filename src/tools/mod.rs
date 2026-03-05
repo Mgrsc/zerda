@@ -6,22 +6,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::memory::Memory;
 use crate::providers::ToolSpec;
+use crate::reflection::ReflectionEngine;
 use crate::skills::Skill;
 use crate::tts::TtsProvider;
 
-pub mod mcp;
-pub mod memory_tool;
-pub mod read;
+pub mod execute_python_script;
 pub mod reload;
 pub mod schema_compat;
+pub mod search_docs;
 pub mod shell;
 pub mod skill;
 pub mod subagent;
 pub mod todo;
 pub mod tts;
-pub mod write;
 
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -55,43 +53,43 @@ use crate::providers::{ChatOptions, Provider};
 
 pub struct BuiltinToolsRuntime {
     pub tool_timeout: u64,
-    pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
+    pub disabled_primitives: Vec<String>,
 }
 
 pub struct BuiltinToolsDependencies {
-    pub memory: Arc<Memory>,
     pub tts_provider: Option<Arc<dyn TtsProvider>>,
     pub skills: Arc<RwLock<Vec<Skill>>>,
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
+    pub reflection: Option<Arc<ReflectionEngine>>,
 }
 
 pub struct BuiltinToolsContext {
     pub tool_timeout: u64,
-    pub memory: Arc<Memory>,
-    pub max_memory_chars: usize,
     pub config_path: Option<PathBuf>,
     pub reload_signal: reload::ReloadSignal,
+    pub disabled_primitives: Vec<String>,
     pub tts_provider: Option<Arc<dyn TtsProvider>>,
     pub skills: Arc<RwLock<Vec<Skill>>>,
     pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub subagent_provider: Option<(Arc<dyn Provider>, ChatOptions)>,
+    pub reflection: Option<Arc<ReflectionEngine>>,
 }
 
 impl BuiltinToolsContext {
     pub fn new(runtime: BuiltinToolsRuntime, dependencies: BuiltinToolsDependencies) -> Self {
         Self {
             tool_timeout: runtime.tool_timeout,
-            memory: dependencies.memory,
-            max_memory_chars: runtime.max_memory_chars,
             config_path: runtime.config_path,
             reload_signal: runtime.reload_signal,
+            disabled_primitives: runtime.disabled_primitives,
             tts_provider: dependencies.tts_provider,
             skills: dependencies.skills,
             skill_cache: dependencies.skill_cache,
             subagent_provider: dependencies.subagent_provider,
+            reflection: dependencies.reflection,
         }
     }
 }
@@ -105,23 +103,19 @@ impl From<(BuiltinToolsRuntime, BuiltinToolsDependencies)> for BuiltinToolsConte
 pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::TodoHandle) {
     let BuiltinToolsContext {
         tool_timeout,
-        memory,
-        max_memory_chars,
         config_path,
         reload_signal,
+        disabled_primitives,
         tts_provider,
         skills,
         skill_cache,
         subagent_provider,
+        reflection,
     } = ctx;
 
     let (todo_tool, todo_handle) = todo::TodoTool::new();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(shell::ShellTool::new(tool_timeout)),
-        Box::new(read::ReadTool),
-        Box::new(write::WriteTool),
         Box::new(reload::ReloadTool::new(config_path, reload_signal)),
-        Box::new(memory_tool::MemoryTool::new(memory, max_memory_chars)),
         Box::new(skill::SkillTool::new(skills, skill_cache)),
         Box::new(todo_tool),
     ];
@@ -133,7 +127,12 @@ pub fn builtin_tools(ctx: BuiltinToolsContext) -> (Vec<Box<dyn Tool>>, todo::Tod
             provider,
             chat_opts,
             tool_timeout,
+            reflection,
+            disabled_primitives,
         )));
+    }
+    if let Some(tool) = search_docs::SearchDocsTool::try_from_env() {
+        tools.push(Box::new(tool));
     }
     (tools, todo_handle)
 }

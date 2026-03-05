@@ -1,49 +1,64 @@
-# [providers.<id>] defines a provider endpoint.
-# <id> is user-defined and used in model references: /model <id>@<model_name>
+# zerda minimal configuration
+# 由 zerda.toml.full 裁剪：保留常用必配项，移除非必要调参项。
+# 其他配置使用代码默认值（见 zerda.toml.full）。
 
+# =============================
+# Providers
+# =============================
 [providers.openai]
-type = "openai_chat"                    # API protocol: openai_chat | openai_responses | anthropic
+type = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
-base_url = "${OPENAI_BASE_URL}"         # API root up to version path, e.g. https://api.openai.com/v1
-                                        # the provider appends /chat/completions, /responses, or /messages
-                                        # leave empty to use the official default endpoint
+base_url = ""
 
-# [providers.anthropic]
-# type = "anthropic"
-# api_key = "${ANTHROPIC_API_KEY}"
-
-[agent]
-
+# =============================
+# Agent
+# =============================
 [agent.primary_model]
-model = "openai@${OPENAI_MODEL}"        # <provider_id>@<model_name>
-vision = true                           # whether to send images to the model (default: true)
-# temperature = 1.0                     # optional; default: unset (API decides)
-# top_p = 1.0                           # optional; default: unset (API decides)
-# max_tokens = 4096                     # optional; default: unset (anthropic uses 4096)
+model = "openai@${OPENAI_MODEL}"
+vision = true
 
-# [agent.fast_model]                    # optional; falls back to primary_model if omitted
-# model = "openai@gpt-4o-mini"
-# vision = false
-# temperature = 1.0
-# top_p = 1.0
-# max_tokens = 4096
+[agent.fast_model]
+model = "openai@${OPENAI_FAST_MODEL}"
+vision = true
 
-# [[channels]]
-# name = "telegram"                     # currently only telegram is supported
-# token = "${TELEGRAM_BOT_TOKEN}"
-# allowed_users = ["*"]                 # allowed user IDs; ["*"] means all users
-# max_message_length = 4096
+# =============================
+# Reflection
+# =============================
+[reflection]
+enabled = false
+llm_model = "openai@${OPENAI_REFLECTION_MODEL}"
+max_tokens = 2048
+embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
+embedding_dim = 1536
 
+# =============================
+# Channels
+# =============================
+[[channels]]
+name = "telegram"
+token = "${TELEGRAM_BOT_TOKEN}"
+allowed_users = []
+max_message_length = 4096
+draft_stream_update_interval_ms = 350
 
-# TTS (optional; disabled when provider is empty)
+# =============================
+# TTS / STT
+# =============================
 [tts]
-provider = "minimax"                    # minimax
+provider = "minimax"
 api_key = "${MINIMAX_API_KEY}"
 model = "speech-2.8-hd"
 voice_id = "female-shaonv"
 
-# STT (optional; disabled when provider is empty)
 [stt]
-provider = "groq"                       # groq
+provider = "groq"
 api_key = "${GROQ_API_KEY}"
 model = "whisper-large-v3-turbo"
+
+# =============================
+# Memory Service
+# =============================
+[memory_service]
+enabled = false
+url = "http://localhost:8080"
+auth_token = "${MEMBURROW_AUTH_TOKEN}"

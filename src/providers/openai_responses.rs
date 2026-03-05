@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use super::{
     apply_sampling_mode, build_openai_content_parts, extract_model_ids, initial_sampling_mode,
     is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
-    ChatOptions, ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode,
-    StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    ChatOptions, ContentPart, ConversationMessage, HttpClient, Provider, ProviderResponse, Role,
+    SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
 };
 use crate::config::ProviderEndpoint;
 
@@ -35,7 +35,15 @@ impl OpenAiResponsesProvider {
         for msg in messages {
             match &msg.role {
                 Role::System => {
-                    instructions = Some(msg.text_content());
+                    let parts_text: Vec<&str> = msg
+                        .content
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    instructions = Some(parts_text.join("\n\n"));
                 }
                 Role::User => {
                     let content = build_openai_content_parts(

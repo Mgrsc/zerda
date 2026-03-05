@@ -30,10 +30,13 @@ RUN pacman -S --noconfirm --needed nodejs npm python python-pipx uv && \
 
 COPY --from=builder /build/target/release/zerda /usr/local/bin/zerda
 COPY skills/ /usr/local/share/zerda/skills/
+COPY code_primitives/ /usr/local/share/zerda/code_primitives/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /root/.zerda
+ENV ZERDA_PRIMITIVES_ROOT=/usr/local/share/zerda/code_primitives/python
+ENV PYTHONPATH=/usr/local/share/zerda/code_primitives/python
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["serve"]

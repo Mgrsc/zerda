@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,14 +8,89 @@ use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use super::{Channel, ChannelMessage};
-use crate::logging::{summarize_text, text_fingerprint};
+use crate::logging::summarize_text;
 use crate::providers::ContentPart;
 use crate::rich_content::{self, RichSegment};
 use crate::stt::SttProvider;
 
 const POLLING_TIMEOUT: u64 = 30;
 const SPLIT_DELAY_MS: u64 = 100;
+const DEFAULT_DRAFT_STREAM_UPDATE_INTERVAL_MS: u64 = 350;
+const DRAFT_STREAM_MESSAGE_ID_PREFIX: &str = "draft:";
+const RECIPIENT_THREAD_SEPARATOR: char = '#';
 const TELEGRAM_PROMPT_SUPPLEMENT: &str = include_str!("../prompts/telegram_supplement.md");
+static NEXT_DRAFT_ID: AtomicI64 = AtomicI64::new(1);
+
+#[derive(Debug, Clone)]
+struct TelegramRecipient {
+    chat_id: String,
+    message_thread_id: Option<i64>,
+}
+
+impl TelegramRecipient {
+    fn parse(raw: &str) -> Self {
+        let Some((chat_id, thread_id_raw)) = raw.split_once(RECIPIENT_THREAD_SEPARATOR) else {
+            return Self {
+                chat_id: raw.to_string(),
+                message_thread_id: None,
+            };
+        };
+        match thread_id_raw.parse::<i64>() {
+            Ok(message_thread_id) => Self {
+                chat_id: chat_id.to_string(),
+                message_thread_id: Some(message_thread_id),
+            },
+            Err(err) => {
+                tracing::warn!(
+                    recipient = raw,
+                    thread_id = thread_id_raw,
+                    "Invalid Telegram recipient thread id: {err}"
+                );
+                Self {
+                    chat_id: raw.to_string(),
+                    message_thread_id: None,
+                }
+            }
+        }
+    }
+
+    fn encode(chat_id: &str, message_thread_id: Option<i64>) -> String {
+        message_thread_id.map_or_else(
+            || chat_id.to_string(),
+            |thread_id| format!("{chat_id}{RECIPIENT_THREAD_SEPARATOR}{thread_id}"),
+        )
+    }
+
+    fn is_private_chat(&self) -> bool {
+        self.chat_id.parse::<i64>().is_ok_and(|id| id > 0)
+    }
+}
+
+fn insert_message_thread_id(body: &mut serde_json::Value, message_thread_id: Option<i64>) {
+    if let Some(message_thread_id) = message_thread_id {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "message_thread_id".to_string(),
+                serde_json::json!(message_thread_id),
+            );
+        }
+    }
+}
+
+fn next_draft_id() -> i64 {
+    let id = NEXT_DRAFT_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        NEXT_DRAFT_ID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
+    }
+}
+
+fn parse_draft_stream_id(message_id: &str) -> Option<i64> {
+    message_id
+        .strip_prefix(DRAFT_STREAM_MESSAGE_ID_PREFIX)
+        .and_then(|id| id.parse::<i64>().ok())
+}
 
 fn split_message(message: &str, max_len: usize) -> Vec<String> {
     let max_len = max_len.max(1);
@@ -504,6 +581,7 @@ pub struct TelegramChannel {
     client: reqwest::Client,
     stt_provider: Option<Arc<dyn SttProvider>>,
     max_message_length: usize,
+    draft_stream_update_interval_ms: u64,
 }
 
 impl TelegramChannel {
@@ -531,12 +609,18 @@ impl TelegramChannel {
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(4096)
             .max(1);
+        let draft_stream_update_interval_ms = params
+            .get("draft_stream_update_interval_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_DRAFT_STREAM_UPDATE_INTERVAL_MS)
+            .max(1);
         Ok(Self {
             token,
             allowed_users,
             client: reqwest::Client::new(),
             stt_provider,
             max_message_length,
+            draft_stream_update_interval_ms,
         })
     }
 
@@ -548,7 +632,8 @@ impl TelegramChannel {
         self.allowed_users.is_empty() || self.allowed_users.iter().any(|u| u == "*" || u == user_id)
     }
 
-    async fn send_text(&self, chat_id: &str, text: &str) -> Result<()> {
+    async fn send_text(&self, recipient: &str, text: &str) -> Result<()> {
+        let target = TelegramRecipient::parse(recipient);
         let chunks = split_message(text, self.max_message_length);
         for (i, chunk) in chunks.iter().enumerate() {
             let candidates = markdown_v2_candidates(chunk);
@@ -558,11 +643,12 @@ impl TelegramChannel {
                 if markdown_ok {
                     break;
                 }
-                let body = serde_json::json!({
-                    "chat_id": chat_id,
+                let mut body = serde_json::json!({
+                    "chat_id": &target.chat_id,
                     "text": candidate,
                     "parse_mode": "MarkdownV2"
                 });
+                insert_message_thread_id(&mut body, target.message_thread_id);
                 let resp = self
                     .client
                     .post(self.api_url("sendMessage"))
@@ -584,10 +670,11 @@ impl TelegramChannel {
                 markdown_errors.push(format!("{status}: {err}"));
             }
             if !markdown_ok {
-                let plain_body = serde_json::json!({
-                    "chat_id": chat_id,
+                let mut plain_body = serde_json::json!({
+                    "chat_id": &target.chat_id,
                     "text": chunk,
                 });
+                insert_message_thread_id(&mut plain_body, target.message_thread_id);
                 let plain_resp = self
                     .client
                     .post(self.api_url("sendMessage"))
@@ -611,50 +698,14 @@ impl TelegramChannel {
         Ok(())
     }
 
-    async fn send_text_msg(&self, chat_id: &str, text: &str) -> Result<serde_json::Value> {
-        let candidates = markdown_v2_candidates(text);
-        for candidate in &candidates {
-            let body = serde_json::json!({
-                "chat_id": chat_id,
-                "text": candidate,
-                "parse_mode": "MarkdownV2"
-            });
-            let resp = self
-                .client
-                .post(self.api_url("sendMessage"))
-                .json(&body)
-                .send()
-                .await?;
-            if resp.status().is_success() {
-                let data: serde_json::Value = resp.json().await?;
-                return Ok(data);
-            }
-        }
-        let plain_body = serde_json::json!({
-            "chat_id": chat_id,
-            "text": text,
-        });
-        let plain_resp = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&plain_body)
-            .send()
-            .await?;
-        let plain_status = plain_resp.status();
-        let plain_raw = plain_resp.text().await?;
-        if !plain_status.is_success() {
-            anyhow::bail!("Telegram sendMessage fallback failed ({plain_status}): {plain_raw}");
-        }
-        let data: serde_json::Value = serde_json::from_str(&plain_raw)?;
-        Ok(data)
-    }
-
-    async fn send_photo(&self, chat_id: &str, url_or_path: &str) -> Result<()> {
+    async fn send_photo(&self, recipient: &str, url_or_path: &str) -> Result<()> {
+        let target = TelegramRecipient::parse(recipient);
         if url_or_path.starts_with("http://") || url_or_path.starts_with("https://") {
-            let body = serde_json::json!({
-                "chat_id": chat_id,
+            let mut body = serde_json::json!({
+                "chat_id": &target.chat_id,
                 "photo": url_or_path
             });
+            insert_message_thread_id(&mut body, target.message_thread_id);
             let resp = self
                 .client
                 .post(self.api_url("sendPhoto"))
@@ -673,9 +724,12 @@ impl TelegramChannel {
                 .unwrap_or("photo.jpg")
                 .to_string();
             let part = reqwest::multipart::Part::bytes(file_bytes).file_name(file_name);
-            let form = reqwest::multipart::Form::new()
-                .text("chat_id", chat_id.to_string())
-                .part("photo", part);
+            let mut form =
+                reqwest::multipart::Form::new().text("chat_id", target.chat_id.to_string());
+            if let Some(message_thread_id) = target.message_thread_id {
+                form = form.text("message_thread_id", message_thread_id.to_string());
+            }
+            form = form.part("photo", part);
             let resp = self
                 .client
                 .post(self.api_url("sendPhoto"))
@@ -690,7 +744,8 @@ impl TelegramChannel {
         Ok(())
     }
 
-    async fn send_voice(&self, chat_id: &str, path: &str) -> Result<()> {
+    async fn send_voice(&self, recipient: &str, path: &str) -> Result<()> {
+        let target = TelegramRecipient::parse(recipient);
         let file_bytes = tokio::fs::read(path).await?;
         let file_name = std::path::Path::new(path)
             .file_name()
@@ -698,9 +753,11 @@ impl TelegramChannel {
             .unwrap_or("voice.ogg")
             .to_string();
         let part = reqwest::multipart::Part::bytes(file_bytes.clone()).file_name(file_name.clone());
-        let form = reqwest::multipart::Form::new()
-            .text("chat_id", chat_id.to_string())
-            .part("voice", part);
+        let mut form = reqwest::multipart::Form::new().text("chat_id", target.chat_id.to_string());
+        if let Some(message_thread_id) = target.message_thread_id {
+            form = form.text("message_thread_id", message_thread_id.to_string());
+        }
+        form = form.part("voice", part);
         let resp = self
             .client
             .post(self.api_url("sendVoice"))
@@ -710,9 +767,12 @@ impl TelegramChannel {
         if !resp.status().is_success() {
             tracing::debug!("sendVoice failed, trying sendAudio");
             let part = reqwest::multipart::Part::bytes(file_bytes).file_name(file_name);
-            let form = reqwest::multipart::Form::new()
-                .text("chat_id", chat_id.to_string())
-                .part("audio", part);
+            let mut form =
+                reqwest::multipart::Form::new().text("chat_id", target.chat_id.to_string());
+            if let Some(message_thread_id) = target.message_thread_id {
+                form = form.text("message_thread_id", message_thread_id.to_string());
+            }
+            form = form.part("audio", part);
             let resp = self
                 .client
                 .post(self.api_url("sendAudio"))
@@ -785,6 +845,31 @@ impl TelegramChannel {
             .ok_or_else(|| anyhow::anyhow!("STT not configured"))?;
         stt.transcribe(&audio_bytes, file_name).await
     }
+
+    async fn send_message_draft(
+        &self,
+        recipient: &TelegramRecipient,
+        draft_id: i64,
+        text: &str,
+    ) -> Result<()> {
+        let mut body = serde_json::json!({
+            "chat_id": &recipient.chat_id,
+            "draft_id": draft_id,
+            "text": text,
+        });
+        insert_message_thread_id(&mut body, recipient.message_thread_id);
+        let resp = self
+            .client
+            .post(self.api_url("sendMessageDraft"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendMessageDraft failed: {err}");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -798,10 +883,12 @@ impl Channel for TelegramChannel {
     }
 
     async fn send_typing(&self, recipient: &str) -> Result<()> {
-        let body = serde_json::json!({
-            "chat_id": recipient,
+        let target = TelegramRecipient::parse(recipient);
+        let mut body = serde_json::json!({
+            "chat_id": &target.chat_id,
             "action": "typing"
         });
+        insert_message_thread_id(&mut body, target.message_thread_id);
         self.client
             .post(self.api_url("sendChatAction"))
             .json(&body)
@@ -839,13 +926,37 @@ impl Channel for TelegramChannel {
     }
 
     async fn send_stream_start(&self, recipient: &str, text: &str) -> Result<Option<String>> {
-        let data = self.send_text_msg(recipient, text).await?;
-        let message_id = data
-            .get("result")
-            .and_then(|r| r.get("message_id"))
-            .and_then(serde_json::Value::as_i64)
-            .map(|id| id.to_string());
-        Ok(message_id)
+        let target = TelegramRecipient::parse(recipient);
+        if !target.is_private_chat() {
+            tracing::debug!(
+                chat_id = %target.chat_id,
+                message_thread_id = ?target.message_thread_id,
+                "Telegram stream fallback to non-stream for non-private chat"
+            );
+            return Ok(None);
+        }
+
+        let draft_id = next_draft_id();
+        match self.send_message_draft(&target, draft_id, text).await {
+            Ok(()) => {
+                tracing::debug!(
+                    chat_id = %target.chat_id,
+                    message_thread_id = ?target.message_thread_id,
+                    draft_id,
+                    "Telegram draft stream started"
+                );
+                Ok(Some(format!("{DRAFT_STREAM_MESSAGE_ID_PREFIX}{draft_id}")))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    chat_id = %target.chat_id,
+                    message_thread_id = ?target.message_thread_id,
+                    draft_id,
+                    "Telegram draft stream unavailable, fallback to non-stream: {e}"
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn send_stream_update(
@@ -854,89 +965,30 @@ impl Channel for TelegramChannel {
         message_id: &str,
         text: &str,
     ) -> Result<()> {
+        let target = TelegramRecipient::parse(recipient);
+        let Some(draft_id) = parse_draft_stream_id(message_id) else {
+            tracing::error!(
+                chat_id = %target.chat_id,
+                message_thread_id = ?target.message_thread_id,
+                message_id,
+                "Unexpected non-draft Telegram stream message id"
+            );
+            anyhow::bail!("unexpected non-draft Telegram stream message_id: {message_id}");
+        };
         let is_intermediate = text.ends_with('▌');
-
         if is_intermediate {
-            let body = serde_json::json!({
-                "chat_id": recipient,
-                "message_id": message_id,
-                "text": text,
-            });
-            let resp = self
-                .client
-                .post(self.api_url("editMessageText"))
-                .json(&body)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let err_text = resp.text().await.unwrap_or_default();
-                if err_text.contains("message is not modified") {
-                    return Ok(());
-                }
-                anyhow::bail!("editMessageText failed: {err_text}");
-            }
+            tokio::time::sleep(Duration::from_millis(self.draft_stream_update_interval_ms)).await;
+            self.send_message_draft(&target, draft_id, text).await?;
             return Ok(());
         }
-
-        let candidates = markdown_v2_candidates(text);
-        let mut markdown_errors = Vec::new();
-        for (idx, candidate) in candidates.iter().enumerate() {
-            let body = serde_json::json!({
-                "chat_id": recipient,
-                "message_id": message_id,
-                "text": candidate,
-                "parse_mode": "MarkdownV2"
-            });
-            let resp = self
-                .client
-                .post(self.api_url("editMessageText"))
-                .json(&body)
-                .send()
-                .await?;
-            if resp.status().is_success() {
-                return Ok(());
-            }
-            let status = resp.status();
-            let err_text = resp.text().await.unwrap_or_default();
-            if err_text.contains("message is not modified") {
-                return Ok(());
-            }
-            tracing::debug!(
-                candidate_idx = idx,
-                candidate_chars = candidate.chars().count(),
-                candidate_fp = %text_fingerprint(candidate),
-                status = %status,
-                "editMessageText MarkdownV2 candidate rejected: {err_text}"
-            );
-            markdown_errors.push(format!("{status}: {err_text}"));
-        }
-
         tracing::debug!(
-            "editMessageText with MarkdownV2 failed: {}",
-            markdown_errors.join(" | ")
+            chat_id = %target.chat_id,
+            message_thread_id = ?target.message_thread_id,
+            draft_id,
+            final_chars = text.chars().count(),
+            "Telegram draft stream finalized with sendMessage"
         );
-        let plain_body = serde_json::json!({
-            "chat_id": recipient,
-            "message_id": message_id,
-            "text": text,
-        });
-        let plain_resp = self
-            .client
-            .post(self.api_url("editMessageText"))
-            .json(&plain_body)
-            .send()
-            .await?;
-        if !plain_resp.status().is_success() {
-            let plain_err = plain_resp.text().await.unwrap_or_default();
-            if plain_err.contains("message is not modified") {
-                return Ok(());
-            }
-            anyhow::bail!(
-                "editMessageText failed (markdown: {}; plain: {plain_err})",
-                markdown_errors.join(" | ")
-            );
-        }
-        Ok(())
+        self.send_text(recipient, text).await
     }
 
     async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> Result<()> {
@@ -1007,6 +1059,14 @@ impl Channel for TelegramChannel {
                     tracing::warn!("Telegram: missing chat_id in message, skipping");
                     continue;
                 };
+                let message_thread_id = message
+                    .get("message_thread_id")
+                    .and_then(serde_json::Value::as_i64);
+                let sender = TelegramRecipient::encode(&chat_id, message_thread_id);
+                let session_id = message_thread_id.map_or_else(
+                    || format!("{chat_id}:{user_id}"),
+                    |thread_id| format!("{chat_id}:{thread_id}:{user_id}"),
+                );
 
                 let (content, content_parts) = if let Some(voice) =
                     message.get("voice").or_else(|| message.get("audio"))
@@ -1097,8 +1157,8 @@ impl Channel for TelegramChannel {
 
                 if let Err(e) = tx
                     .send(ChannelMessage {
-                        sender: chat_id.clone(),
-                        session_id: format!("{chat_id}:{user_id}"),
+                        sender,
+                        session_id,
                         content,
                         content_parts,
                         channel: "telegram".to_string(),
