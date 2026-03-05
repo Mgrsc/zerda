@@ -23,11 +23,19 @@ impl ReflectionEngine {
     pub fn try_new(
         provider: Arc<dyn Provider>,
         chat_opts: ChatOptions,
+        qdrant_url: &str,
+        qdrant_api_key: Option<&str>,
         embedding_dim: Option<u64>,
         embedding_provider: &ProviderEndpoint,
         embedding_model: &str,
     ) -> Option<Self> {
-        let store = QdrantStore::try_new(embedding_dim, embedding_provider, embedding_model)?;
+        let store = QdrantStore::try_new(
+            qdrant_url,
+            qdrant_api_key,
+            embedding_dim,
+            embedding_provider,
+            embedding_model,
+        )?;
         let analyzer = ReflectionAnalyzer::new(provider, chat_opts);
         Some(Self { store, analyzer })
     }

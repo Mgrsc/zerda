@@ -183,6 +183,8 @@ async fn main() -> Result<()> {
                                         match reflection::ReflectionEngine::try_new(
                                             reflection_provider,
                                             reflection_opts,
+                                            &cfg.reflection.qdrant_url,
+                                            Some(&cfg.reflection.qdrant_api_key),
                                             cfg.reflection.embedding_dim,
                                             embedding_provider,
                                             &embedding_ref.model_name,

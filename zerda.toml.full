@@ -62,6 +62,8 @@ llm_model = ""                          # default: empty; required only when ena
 max_tokens = 2048
 # embedding_model = "openai@text-embedding-3-small"  # optional; default: "<llm provider>@text-embedding-3-small" when enabled
 # embedding_dim = 1536                  # optional; model-specific
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
 
 # =============================
 # Docs Search (optional)
@@ -116,7 +118,7 @@ model = "whisper-large-v3-turbo"
 # =============================
 [memory_service]
 enabled = false
-url = "http://localhost:8080"
+url = "http://memory-service:8080"
 auth_token = ""
 tenant_id = "default"
 default_entity_id = "user_default"

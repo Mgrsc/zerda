@@ -114,6 +114,24 @@ model = "whisper-large-v3-turbo" # Default: "whisper-large-v3-turbo"
 
 Used for Telegram voice message transcription.
 
+## Reflection Memory Loop
+
+```toml
+[reflection]
+enabled = false
+llm_model = "openai@${OPENAI_REFLECTION_MODEL}"
+max_tokens = 2048
+embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}" # optional
+embedding_dim = 1536                                 # optional
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
+```
+
+- `llm_model`: Reflection analysis model (`provider_id@model_name`).
+- `embedding_model`: Optional embedding model (`provider_id@model_name`), defaults to `<llm provider>@text-embedding-3-small`.
+- `qdrant_url`: Qdrant endpoint for reflection guideline collection.
+- `qdrant_api_key`: Optional Qdrant API key. Empty string means no API key header is sent.
+
 ## Memory Service (MemBurrow)
 
 ```toml

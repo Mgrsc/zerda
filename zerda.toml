@@ -30,6 +30,8 @@ llm_model = "openai@${OPENAI_REFLECTION_MODEL}"
 max_tokens = 2048
 embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
 embedding_dim = 1536
+qdrant_url = "http://qdrant:6333"
+qdrant_api_key = ""
 
 # =============================
 # Docs Search

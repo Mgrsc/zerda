@@ -167,6 +167,10 @@ pub struct ReflectionConfig {
     pub embedding_model: Option<String>,
     #[serde(default)]
     pub embedding_dim: Option<u64>,
+    #[serde(default = "default_reflection_qdrant_url")]
+    pub qdrant_url: String,
+    #[serde(default)]
+    pub qdrant_api_key: String,
 }
 
 const fn default_reflection_max_tokens() -> Option<u32> {
@@ -181,6 +185,8 @@ impl Default for ReflectionConfig {
             max_tokens: default_reflection_max_tokens(),
             embedding_model: None,
             embedding_dim: None,
+            qdrant_url: default_reflection_qdrant_url(),
+            qdrant_api_key: String::new(),
         }
     }
 }
@@ -367,7 +373,7 @@ impl Default for MemoryServiceConfig {
 }
 
 fn default_memory_service_url() -> String {
-    "http://localhost:8080".to_string()
+    "http://memory-service:8080".to_string()
 }
 fn default_memory_tenant_id() -> String {
     "default".to_string()
@@ -383,6 +389,9 @@ fn default_docs_search_embedding_model() -> String {
 }
 const fn default_docs_search_embedding_dim() -> u64 {
     1536
+}
+fn default_reflection_qdrant_url() -> String {
+    "http://qdrant:6333".to_string()
 }
 fn default_docs_search_qdrant_url() -> String {
     "http://qdrant:6333".to_string()
@@ -586,6 +595,10 @@ fn validate_config(config: &Config) -> Result<()> {
         anyhow::ensure!(
             config.reflection.as_model_config().is_some(),
             "reflection.enabled=true requires non-empty reflection.llm_model (provider_id@model_name)"
+        );
+        anyhow::ensure!(
+            !config.reflection.qdrant_url.trim().is_empty(),
+            "reflection.qdrant_url must not be empty when reflection.enabled=true"
         );
     }
 

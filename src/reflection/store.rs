@@ -38,11 +38,17 @@ struct EmbeddingData {
 
 impl QdrantStore {
     pub fn try_new(
+        qdrant_url: &str,
+        qdrant_api_key: Option<&str>,
         embedding_dim_override: Option<u64>,
         embedding_provider: &ProviderEndpoint,
         embedding_model: &str,
     ) -> Option<Self> {
-        let qdrant_url = read_non_empty_env("QDRANT_URL")?;
+        let qdrant_url = qdrant_url.trim();
+        if qdrant_url.is_empty() {
+            tracing::warn!("REFLECTION: empty qdrant_url in configuration");
+            return None;
+        }
         let embedding_api_key = embedding_provider.api_key.trim().to_string();
         if embedding_api_key.is_empty() {
             tracing::warn!(
@@ -63,9 +69,9 @@ impl QdrantStore {
         };
         let embedding_dim = embedding_dim_override.unwrap_or(DEFAULT_EMBEDDING_DIM);
 
-        let mut qdrant_config = QdrantConfig::from_url(&qdrant_url);
-        if let Some(api_key) = read_non_empty_env("QDRANT_API_KEY") {
-            qdrant_config = qdrant_config.api_key(api_key);
+        let mut qdrant_config = QdrantConfig::from_url(qdrant_url);
+        if let Some(api_key) = qdrant_api_key.map(str::trim).filter(|v| !v.is_empty()) {
+            qdrant_config = qdrant_config.api_key(api_key.to_string());
         }
 
         let qdrant = match Qdrant::new(qdrant_config) {
@@ -230,13 +236,6 @@ impl QdrantStore {
 
         Ok(())
     }
-}
-
-fn read_non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 fn truncate(s: &str, max: usize) -> &str {
