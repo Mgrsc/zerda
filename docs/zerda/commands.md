@@ -76,8 +76,9 @@ This takes effect immediately for the current session without needing a config r
 Change `primary_model` in `zerda.toml`:
 
 ```toml
-[agent]
-primary_model = { name = "openai@gpt-4o-mini" }
+[agent.primary_model]
+model = "openai@gpt-4o-mini"
+vision = true
 ```
 
 Then either restart Zerda or use the `reload` tool with `mode='full'`.

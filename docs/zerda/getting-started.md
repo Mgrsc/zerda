@@ -20,8 +20,9 @@ The binary is located at `target/release/zerda`.
 type = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
 
-[agent]
-primary_model = { name = "openai@gpt-4o" }
+[agent.primary_model]
+model = "openai@gpt-4o"
+vision = true
 ```
 
 3. Run Zerda:

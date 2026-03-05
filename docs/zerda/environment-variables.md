@@ -12,9 +12,9 @@
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | OpenAI API key |
-| `OPENAI_BASE_URL` | OpenAI-compatible API base URL |
+| `OPENAI_BASE_URL` | OpenAI-compatible API base URL (used when referenced by provider `base_url`) |
 | `OPENAI_MODEL` | Default OpenAI model name |
-| `OPENAI_COMPRESSION_MODEL` | Model for compression/subagent |
+| `OPENAI_FAST_MODEL` | Fast model name for compression/subagent |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 
 ## Channels

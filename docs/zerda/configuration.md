@@ -31,18 +31,6 @@ request_timeout_secs = 120    # Default: 120
 
 ```toml
 [agent]
-# Primary model (required) - format: provider_id@model_name
-primary_model = { name = "openai@gpt-4o", vision = true, temperature = 0.7 }
-
-# Fast model for compression and subagent (optional, falls back to primary)
-fast_model = { name = "openai@gpt-4o-mini" }
-
-# Model parameters (all optional)
-# primary_model.vision = true        # Enable image processing (default: true)
-# primary_model.temperature = 0.7    # Sampling temperature (0.0-2.0)
-# primary_model.top_p = 1.0          # Top-p sampling (0.0-1.0)
-# primary_model.max_tokens = 4096    # Output token limit
-
 max_iterations = 10           # Max tool calls per turn (default: 10, min: 10)
 max_history = 30              # Message count before auto-compression (default: 30)
 max_tool_output_chars = 30000 # Truncate tool results exceeding this (default: 30000)
@@ -52,6 +40,20 @@ session_cleanup_days = 7      # Auto-clean sessions older than N days (default: 
 show_usage = false            # Print token usage after each turn (default: false)
 # max_budget_tokens = 100000  # Session token budget, unlimited by default
 identity_path = "~/.zerda/identity.md"  # System role definition (default)
+
+[agent.primary_model]
+model = "openai@gpt-4o"       # required, format: provider_id@model_name
+vision = true
+# temperature = 0.7           # optional, range: 0.0-2.0
+# top_p = 1.0                 # optional, range: 0.0-1.0
+# max_tokens = 4096           # optional
+
+[agent.fast_model]            # optional, falls back to primary model if omitted
+model = "openai@gpt-4o-mini"
+vision = true
+# temperature = 0.7
+# top_p = 1.0
+# max_tokens = 4096
 ```
 
 ## Channels
@@ -117,7 +119,7 @@ Used for Telegram voice message transcription.
 ```toml
 [memory_service]
 enabled = true
-url = "http://localhost:8080"
+url = "http://memory-service:8080" # Docker compose service DNS; use localhost in bare-metal runs
 auth_token = "${MEMBURROW_AUTH_TOKEN}"
 tenant_id = "default"
 default_entity_id = "user_default"

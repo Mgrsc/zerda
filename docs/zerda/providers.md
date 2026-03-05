@@ -45,16 +45,23 @@ api_key = "${ANTHROPIC_API_KEY}"
 Models are referenced as `provider_id@model_name`:
 
 ```toml
-[agent]
-primary_model = { name = "openai@gpt-4o", vision = true, temperature = 0.7, top_p = 1.0, max_tokens = 4096 }
-fast_model = { name = "openai@gpt-4o-mini" }
+[agent.primary_model]
+model = "openai@gpt-4o"
+vision = true
+temperature = 0.7
+top_p = 1.0
+max_tokens = 4096
+
+[agent.fast_model]
+model = "openai@gpt-4o-mini"
+vision = true
 ```
 
 ### Parameters
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| `name` | - | required | `provider_id@model_name` |
+| `model` | - | required | `provider_id@model_name` |
 | `vision` | bool | true | Enable image processing |
 | `temperature` | 0.0-2.0 | provider default | Sampling temperature |
 | `top_p` | 0.0-1.0 | provider default | Top-p sampling |
