@@ -14,7 +14,23 @@ services:
       - ./identity.md:/root/.zerda/identity.md
       # - ./mcp.toml:/root/.zerda/mcp.toml
     depends_on:
+      - memory-service
       - qdrant
+
+  postgres:
+    image: postgres:18.3-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: memburrow
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d memburrow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   qdrant:
     image: docker.io/qdrant/qdrant
@@ -25,6 +41,20 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  memory-service:
+    image: ghcr.io/mgrsc/memburrow:latest
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 5s
+    env_file:
+      - .env.distributed.example
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - qdrant
+
 volumes:
   zerda-data:
+  postgres-data:
   qdrant-data:

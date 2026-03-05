@@ -118,6 +118,7 @@ Zerda expands `${VAR}` values in TOML from process environment variables.
 
 - Docker mode: `docker compose` loads `.env` automatically via `env_file`.
 - Manual mode: Zerda does not auto-load `.env`. You need to load it in your shell first.
+- In the integrated compose setup, `memory-service` uses a separate env file (`.env.distributed.example`) and does not merge its variables into Zerda's `.env`.
 
 ```bash
 set -a
@@ -254,6 +255,10 @@ The memory pipeline mitigates these issues with several design choices:
 5. Graceful degradation and repair: SQL fallback when vector search fails, plus periodic reconciliation to reduce SQL-vector drift.
 
 For Zerda, this reduces prompt bloat from history replay, improves retention of actionable constraints, and keeps recall behavior stable under partial dependency failures.
+
+In the default integrated deployment, MemBurrow and Zerda reflection share the same Qdrant instance. Collection names are isolated by design, so data does not collide:
+- MemBurrow collection: `memburrow_agent_memory`
+- Zerda reflection collection: `zerda_executor_guidelines`
 
 ### Executor Reflection Memory Loop (Heuristic)
 

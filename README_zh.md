@@ -118,6 +118,7 @@ Zerda 会从进程环境变量中展开 TOML 内的 `${VAR}` 占位符。
 
 - Docker 模式：`docker compose` 通过 `env_file` 自动加载 `.env`。
 - 手动启动：Zerda 不会自动读取 `.env`，需要先在 shell 中加载。
+- 在集成后的 compose 部署中，`memory-service` 使用独立环境文件（`.env.distributed.example`），不会把其变量并入 Zerda 的 `.env`。
 
 ```bash
 set -a
@@ -254,6 +255,10 @@ Zerda 引入了轻量外部记忆服务 [MemBurrow](https://github.com/Mgrsc/Mem
 5. 优雅降级与修复：向量检索失败时回退 SQL，并通过周期性 reconciliation 降低 SQL-向量漂移。
 
 对 Zerda 的直接收益是：减少历史回放造成的提示词膨胀，提升可执行约束的保留率，并在部分依赖异常时保持更稳定的记忆召回行为。
+
+在默认一体化部署中，MemBurrow 与 Zerda 反思链路共享同一个 Qdrant 实例，但通过 collection 名隔离，不会互相冲突：
+- MemBurrow collection：`memburrow_agent_memory`
+- Zerda 反思 collection：`zerda_executor_guidelines`
 
 ### Executor 启发式反思记忆闭环
 

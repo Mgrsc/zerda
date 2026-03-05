@@ -60,5 +60,5 @@ model = "whisper-large-v3-turbo"
 # =============================
 [memory_service]
 enabled = false
-url = "http://localhost:8080"
+url = "http://memory-service:8080"
 auth_token = "${MEMBURROW_AUTH_TOKEN}"
