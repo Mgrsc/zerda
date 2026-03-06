@@ -30,6 +30,14 @@ if [ -d "$BUNDLED_SKILLS" ]; then
     done
 fi
 
+BUNDLED_DOCS="/usr/local/share/zerda/docs/zerda"
+USER_DOCS="/root/.zerda/docs/zerda"
+if [ -d "$BUNDLED_DOCS" ] && [ ! -d "$USER_DOCS" ]; then
+    mkdir -p "$(dirname "$USER_DOCS")"
+    cp -r "$BUNDLED_DOCS" "$USER_DOCS"
+    echo "[supervisor] Installed bundled docs: zerda"
+fi
+
 child_pid=0
 
 forward_signal() {

@@ -30,6 +30,7 @@ RUN pacman -S --noconfirm --needed nodejs npm python python-pipx uv && \
 
 COPY --from=builder /build/target/release/zerda /usr/local/bin/zerda
 COPY skills/ /usr/local/share/zerda/skills/
+COPY docs/zerda/ /usr/local/share/zerda/docs/zerda/
 COPY code_primitives/ /usr/local/share/zerda/code_primitives/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
