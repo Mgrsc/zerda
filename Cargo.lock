@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "zerda"
-version = "0.1.0-beta.1"
+version = "0.1.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
