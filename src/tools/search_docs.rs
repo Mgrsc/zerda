@@ -366,7 +366,7 @@ impl QdrantDocsBackend {
         if !removed_ids.is_empty() {
             let ids = removed_ids
                 .into_iter()
-                .map(|id| -> qdrant_client::qdrant::PointId { id.into() })
+                .map(|id| -> qdrant_client::qdrant::PointId { doc_point_id(&id).into() })
                 .collect::<Vec<_>>();
             let removed_count = ids.len();
             self.retry_with_backoff(
@@ -409,7 +409,8 @@ impl QdrantDocsBackend {
                     })
                     .try_into()
                     .context("search_zerda_documents: build payload")?;
-                    let point = PointStruct::new(doc_id.clone(), doc_vector.clone(), payload);
+                    let point =
+                        PointStruct::new(doc_point_id(&doc_id), doc_vector.clone(), payload);
                     self.qdrant
                         .upsert_points(UpsertPointsBuilder::new(&self.collection, vec![point]))
                         .await
@@ -671,4 +672,13 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max_chars).collect::<String>()
+}
+
+fn doc_point_id(doc_id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in doc_id.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }

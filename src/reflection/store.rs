@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use qdrant_client::config::QdrantConfig;
+use qdrant_client::qdrant::point_id::PointIdOptions;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, DeletePointsBuilder, Distance, PointStruct, PointsIdsList,
     QueryPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
@@ -187,10 +188,18 @@ impl QdrantStore {
             if guideline_text.is_empty() {
                 continue;
             }
-            let id = match &point.id {
-                Some(pid) => format!("{pid:?}"),
-                None => continue,
-            };
+            let id = point
+                .id
+                .as_ref()
+                .and_then(|pid| match &pid.point_id_options {
+                    Some(PointIdOptions::Uuid(v)) => Some(v.clone()),
+                    Some(PointIdOptions::Num(v)) => Some(v.to_string()),
+                    None => None,
+                })
+                .unwrap_or_default();
+            if id.is_empty() {
+                continue;
+            }
             guidelines.push(Guideline {
                 id,
                 guideline_text,
@@ -203,7 +212,7 @@ impl QdrantStore {
 
     pub async fn insert(&self, id: &str, instruction: &str, guideline: &str) -> Result<()> {
         let vector = self.embed(instruction).await?;
-        let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
+        let point_id = point_id_from_str(id);
         let payload: qdrant_client::Payload = serde_json::json!({
             "guideline_text": guideline,
             "instruction_digest": truncate(instruction, 200),
@@ -224,7 +233,7 @@ impl QdrantStore {
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
+        let point_id = point_id_from_str(id);
         self.qdrant
             .delete_points(
                 DeletePointsBuilder::new(&self.collection).points(PointsIdsList {
@@ -247,5 +256,12 @@ fn truncate(s: &str, max: usize) -> &str {
             end -= 1;
         }
         &s[..end]
+    }
+}
+
+fn point_id_from_str(id: &str) -> qdrant_client::qdrant::PointId {
+    match id.parse::<u64>() {
+        Ok(v) => v.into(),
+        Err(_) => id.to_string().into(),
     }
 }
