@@ -325,4 +325,6 @@ The prompt architecture is split into two layers. The **system prompt** serves a
 
 ## 📄 License
 
-This project is open-sourced under the [MIT License](LICENSE).
+This project is dual-licensed:
+- Open source use: [AGPL-3.0-only](LICENSE)
+- Proprietary/closed-source use: commercial license from the maintainers

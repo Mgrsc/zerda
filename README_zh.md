@@ -326,4 +326,6 @@ Zerda 不会清理失败动作（Failed Actions）和工具报错（Tool Errors�
 
 ## 📄 开源协议
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目采用双许可证：
+- 开源使用：[AGPL-3.0-only](LICENSE)
+- 专有/闭源使用：请联系维护者获取商业授权
