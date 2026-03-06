@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use qdrant_client::qdrant::{
 use qdrant_client::{Payload, Qdrant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
+use tokio::time::sleep;
 
 use super::{Tool, ToolResult};
 
@@ -22,6 +24,12 @@ const INDEX_STATE_FILE: &str = "docs_search_index_state.json";
 const INDEX_STATE_VERSION: u32 = 1;
 const EMBED_MAX_CHARS: usize = 8000;
 const SNIPPET_MAX_CHARS: usize = 260;
+const INIT_INDEX_MAX_ATTEMPTS: usize = 8;
+const INIT_INDEX_BACKOFF_MS: u64 = 1_000;
+const QDRANT_OP_MAX_ATTEMPTS: usize = 6;
+const QDRANT_OP_BACKOFF_MS: u64 = 500;
+const EMBEDDING_OP_MAX_ATTEMPTS: usize = 4;
+const EMBEDDING_OP_BACKOFF_MS: u64 = 700;
 
 #[async_trait]
 trait DocSearchBackend: Send + Sync {
@@ -222,10 +230,72 @@ impl QdrantDocsBackend {
     fn spawn_initial_indexing(self: &std::sync::Arc<Self>) {
         let backend = std::sync::Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(e) = backend.ensure_indexed().await {
+            if let Err(e) = backend.ensure_indexed_with_retry().await {
                 tracing::warn!("search_zerda_documents: initial indexing failed: {e:#}");
             }
         });
+    }
+
+    async fn ensure_indexed_with_retry(&self) -> Result<()> {
+        self.retry_with_backoff(
+            "initial index sync",
+            INIT_INDEX_MAX_ATTEMPTS,
+            INIT_INDEX_BACKOFF_MS,
+            || async { self.ensure_indexed().await },
+        )
+        .await
+    }
+
+    async fn retry_with_backoff<T, F, Fut>(
+        &self,
+        op_name: &str,
+        max_attempts: usize,
+        base_backoff_ms: u64,
+        mut action: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut attempt = 1usize;
+        loop {
+            match action().await {
+                Ok(value) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            op = op_name,
+                            attempt,
+                            max_attempts,
+                            "search_zerda_documents: retry succeeded"
+                        );
+                    }
+                    return Ok(value);
+                }
+                Err(err) => {
+                    if attempt >= max_attempts {
+                        tracing::error!(
+                            op = op_name,
+                            attempt,
+                            max_attempts,
+                            error = %err,
+                            "search_zerda_documents: retry exhausted"
+                        );
+                        return Err(err);
+                    }
+                    let backoff_ms = base_backoff_ms.saturating_mul(1_u64 << (attempt - 1));
+                    tracing::warn!(
+                        op = op_name,
+                        attempt,
+                        max_attempts,
+                        backoff_ms,
+                        error = %err,
+                        "search_zerda_documents: operation failed, retrying"
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     async fn ensure_indexed(&self) -> Result<()> {
@@ -240,21 +310,37 @@ impl QdrantDocsBackend {
 
     async fn ensure_collection(&self) -> Result<()> {
         let exists = self
-            .qdrant
-            .collection_exists(&self.collection)
-            .await
-            .context("search_zerda_documents: check collection existence")?;
+            .retry_with_backoff(
+                "qdrant collection_exists",
+                QDRANT_OP_MAX_ATTEMPTS,
+                QDRANT_OP_BACKOFF_MS,
+                || async {
+                    self.qdrant
+                        .collection_exists(&self.collection)
+                        .await
+                        .context("search_zerda_documents: check collection existence")
+                },
+            )
+            .await?;
         if exists {
             return Ok(());
         }
-        self.qdrant
-            .create_collection(
-                CreateCollectionBuilder::new(&self.collection).vectors_config(
-                    VectorParamsBuilder::new(self.embedding_dim, Distance::Cosine),
-                ),
-            )
-            .await
-            .context("search_zerda_documents: create collection")?;
+        self.retry_with_backoff(
+            "qdrant create_collection",
+            QDRANT_OP_MAX_ATTEMPTS,
+            QDRANT_OP_BACKOFF_MS,
+            || async {
+                self.qdrant
+                    .create_collection(
+                        CreateCollectionBuilder::new(&self.collection).vectors_config(
+                            VectorParamsBuilder::new(self.embedding_dim, Distance::Cosine),
+                        ),
+                    )
+                    .await
+                    .context("search_zerda_documents: create collection")
+            },
+        )
+        .await?;
         tracing::info!(
             "search_zerda_documents: created Qdrant collection '{}'",
             self.collection
@@ -282,29 +368,60 @@ impl QdrantDocsBackend {
                 .into_iter()
                 .map(|id| -> qdrant_client::qdrant::PointId { id.into() })
                 .collect::<Vec<_>>();
-            self.qdrant
-                .delete_points(
-                    DeletePointsBuilder::new(&self.collection).points(PointsIdsList { ids }),
-                )
-                .await
-                .context("search_zerda_documents: delete removed docs")?;
+            let removed_count = ids.len();
+            self.retry_with_backoff(
+                "qdrant delete removed docs",
+                QDRANT_OP_MAX_ATTEMPTS,
+                QDRANT_OP_BACKOFF_MS,
+                || async {
+                    self.qdrant
+                        .delete_points(
+                            DeletePointsBuilder::new(&self.collection)
+                                .points(PointsIdsList { ids: ids.clone() }),
+                        )
+                        .await
+                        .context("search_zerda_documents: delete removed docs")
+                },
+            )
+            .await?;
+            tracing::debug!(
+                removed_count,
+                collection = %self.collection,
+                "search_zerda_documents: removed stale docs from qdrant"
+            );
         }
 
         for doc in changed_docs {
             let content = std::fs::read_to_string(&doc.path)
                 .with_context(|| format!("search_zerda_documents: read {}", doc.path.display()))?;
             let vector = self.embed(&content).await?;
-            let payload: Payload = serde_json::json!({
-                "path": doc.id,
-                "content": content,
-            })
-            .try_into()
-            .context("search_zerda_documents: build payload")?;
-            let point = PointStruct::new(doc.id.clone(), vector, payload);
-            self.qdrant
-                .upsert_points(UpsertPointsBuilder::new(&self.collection, vec![point]))
-                .await
-                .with_context(|| format!("search_zerda_documents: upsert {}", doc.id))?;
+            let doc_id = doc.id.clone();
+            let doc_content = content.clone();
+            let doc_vector = vector.clone();
+            self.retry_with_backoff(
+                "qdrant upsert doc",
+                QDRANT_OP_MAX_ATTEMPTS,
+                QDRANT_OP_BACKOFF_MS,
+                || async {
+                    let payload: Payload = serde_json::json!({
+                        "path": doc_id,
+                        "content": doc_content,
+                    })
+                    .try_into()
+                    .context("search_zerda_documents: build payload")?;
+                    let point = PointStruct::new(doc_id.clone(), doc_vector.clone(), payload);
+                    self.qdrant
+                        .upsert_points(UpsertPointsBuilder::new(&self.collection, vec![point]))
+                        .await
+                        .with_context(|| format!("search_zerda_documents: upsert {doc_id}"))
+                },
+            )
+            .await?;
+            tracing::debug!(
+                doc_id = %doc.id,
+                collection = %self.collection,
+                "search_zerda_documents: upserted doc embedding"
+            );
         }
 
         let mut files = HashMap::new();
@@ -329,55 +446,76 @@ impl QdrantDocsBackend {
             "{}/embeddings",
             self.embedding_base_url.trim_end_matches('/')
         );
-        let body = serde_json::json!({
-            "model": self.embedding_model,
-            "input": truncate_chars(text, EMBED_MAX_CHARS),
-            "dimensions": self.embedding_dim,
-        });
-        let resp = self
-            .http_client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.embedding_api_key),
-            )
-            .json(&body)
-            .send()
-            .await
-            .context("search_zerda_documents: embedding request failed")?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("search_zerda_documents: embedding API returned {status}: {text}");
-        }
-        let parsed: EmbeddingResponse = resp
-            .json()
-            .await
-            .context("search_zerda_documents: parse embedding response")?;
-        parsed
-            .data
-            .into_iter()
-            .next()
-            .map(|d| d.embedding)
-            .ok_or_else(|| anyhow::anyhow!("search_zerda_documents: empty embedding response"))
+        let input = truncate_chars(text, EMBED_MAX_CHARS);
+        self.retry_with_backoff(
+            "embedding request",
+            EMBEDDING_OP_MAX_ATTEMPTS,
+            EMBEDDING_OP_BACKOFF_MS,
+            || async {
+                let body = serde_json::json!({
+                    "model": self.embedding_model,
+                    "input": input.clone(),
+                    "dimensions": self.embedding_dim,
+                });
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", self.embedding_api_key),
+                    )
+                    .json(&body)
+                    .send()
+                    .await
+                    .context("search_zerda_documents: embedding request failed")?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!(
+                        "search_zerda_documents: embedding API returned {status}: {text}"
+                    );
+                }
+                let parsed: EmbeddingResponse = resp
+                    .json()
+                    .await
+                    .context("search_zerda_documents: parse embedding response")?;
+                parsed
+                    .data
+                    .into_iter()
+                    .next()
+                    .map(|d| d.embedding)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("search_zerda_documents: empty embedding response")
+                    })
+            },
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl DocSearchBackend for QdrantDocsBackend {
     async fn search(&self, query: &str, max_results: u64) -> Result<DocSearchResult> {
-        self.ensure_indexed().await?;
+        self.ensure_indexed_with_retry().await?;
         let vector = self.embed(query).await?;
         let response = self
-            .qdrant
-            .query(
-                QueryPointsBuilder::new(&self.collection)
-                    .query(vector)
-                    .limit(max_results)
-                    .with_payload(true),
+            .retry_with_backoff(
+                "qdrant query docs",
+                QDRANT_OP_MAX_ATTEMPTS,
+                QDRANT_OP_BACKOFF_MS,
+                || async {
+                    self.qdrant
+                        .query(
+                            QueryPointsBuilder::new(&self.collection)
+                                .query(vector.clone())
+                                .limit(max_results)
+                                .with_payload(true),
+                        )
+                        .await
+                        .context("search_zerda_documents: query qdrant")
+                },
             )
-            .await
-            .context("search_zerda_documents: query qdrant")?;
+            .await?;
 
         let mut blocks = Vec::new();
         let mut sources = Vec::new();
