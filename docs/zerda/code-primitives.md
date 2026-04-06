@@ -2,11 +2,11 @@
 
 ## Overview
 
-Code primitives are prewritten async Python functions injected into executor scripts. They provide reliable, well-tested implementations for common operations.
+Code primitives are prewritten async Python functions injected into PTC job scripts. They provide reliable implementations for common operations, while Rust handles primitive discovery metadata and lookup.
 
 ## Location
 
-Primitives are located in `code_primitives/python/`:
+Core primitives are located in `code_primitives/python/`:
 
 ```
 code_primitives/python/
@@ -19,33 +19,54 @@ code_primitives/python/
 │   └── [implementations]     # Individual primitive files
 ```
 
-Override the root path via `ZERDA_PRIMITIVES_ROOT` environment variable.
+All non-core primitives live in `custom_primitives/`.
 
-## Available Primitives
+Override the core root path via `ZERDA_PRIMITIVES_ROOT` environment variable.
 
-### `extract_main_text_from_html`
+## Primitive Sources
 
-Extract article text from raw HTML using standard library (no external dependencies).
+### Core
 
-- Input: HTML string
-- Output: `data.markdown`, `data.html`, `data.metadata`
+- `fs_read`
+- `fs_write`
+- `fs_replace`
+- `fs_list`
+- `fs_move`
+- `fs_delete`
+- `process_run`
+- `process_spawn`
+- `process_poll`
+- `process_terminate`
+- `shell`
 
-### `firecrawl_scrape_page`
+### Custom
 
-Scrape a URL using the Firecrawl API.
+- `agent_browser`
+- `extract_main_text_from_html`
+- `firecrawl_search_web`
+- `scrapling_fetch_page`
 
-- Requires: `FIRECRAWL_API_KEY` environment variable
-- Input: URL string
-- Output: `data.markdown`, `data.html`, `data.metadata`, `data.results`
-- Features: Input validation, hard timeout, retry policy
+## Runtime Discovery
 
-### `firecrawl_search_web`
+Prompt-native discovery helpers:
 
-Web search via Firecrawl API.
+- `<PTC_AVALIABLE_PRIMITIVES>`
+- `help(...)`
 
-- Requires: `FIRECRAWL_API_KEY` environment variable
-- Input: Search query
-- Output: Search results with normalized flat access
+Prompt policy:
+
+- `<PTC_AVALIABLE_PRIMITIVES>` lists only top-level public primitive names from both core and custom sources.
+- Core filesystem and process primitives such as `fs_read` are included in that block just like custom primitives.
+- Complex families may expose one top-level namespace name such as `agent_browser`; method discovery then happens through `help("agent_browser")`.
+- Parameter shapes, defaults, and output fields should be learned through `help("name")`, not guessed from prompt text.
+- The built-in `shell` primitive uses `command` as its canonical parameter and also accepts `cmd` as a compatibility alias for model-generated code.
+- Some tools may also expose `get_workflow` for end-to-end setup or installation guidance after `help(...)` reveals that it exists.
+- Current web routing is Firecrawl for search, Scrapling primitives for page fetching, and `agent_browser` for interactive validation.
+- `scrapling_fetch_page` automatically routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body extraction is preferred over full-page text.
+- `scrapling_fetch_page` also retries with stealth fetch on selected dynamic-content domains when the first static result looks like a shell page or lacks usable content.
+- `scrapling_fetch_page` requires `scrapling[fetchers]` in the Python runtime and returns `dependency_missing` when that runtime dependency is absent.
+- `scrapling_fetch_page` may also require Playwright browser binaries when its internal stealth path is needed for selected dynamic-content domains.
+- Python execution surface should stay thin: prefer a single `<PTC_TOOL_CALLING>` block carrying async body code directly.
 
 ## Primitive Enablement
 
@@ -64,9 +85,9 @@ All primitives return a standardized structure:
 
 ```json
 {
-  "status": "ok|partial|error|timeout",
+  "status": "ok|invalid_argument|timeout|dependency_missing|upstream_error|rate_limited|internal_error",
   "data": { ... },
-  "error_code": "INVALID_ARGUMENT|TIMEOUT|DEPENDENCY_MISSING|UPSTREAM_ERROR|RATE_LIMITED",
+  "error_code": "implementation-specific error code",
   "error_message": "Human-readable description",
   "retryable": true
 }
@@ -81,11 +102,12 @@ All primitives return a standardized structure:
 - Idempotent by design
 - Silent telemetry (only writes to `telemetry.jsonl`)
 
-## Using Primitives in Executor
+## Using Primitives in PTC Jobs
 
-Primitives are automatically available in executor scripts. The executor injects environment variables:
+Primitives are automatically available in PTC job scripts. The runtime injects environment variables:
 
-- `EXECUTOR_PRIMITIVES_PY_ROOT`: Path to primitives directory
-- `EXECUTOR_DISABLED_PRIMITIVES`: JSON array or comma-separated primitive blacklist
+- `PTC_PRIMITIVES_PY_ROOT`: Path to primitives directory
+- `PTC_PRIMITIVES_PY_ROOTS`: JSON array of primitive package roots
+- `PTC_DISABLED_PRIMITIVES`: JSON array or comma-separated primitive blacklist
 
 The bootstrap and startup hooks handle importing and making primitives available.

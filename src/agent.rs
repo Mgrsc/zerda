@@ -1,44 +1,37 @@
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::Result;
 use futures::StreamExt as _;
-use uuid::Uuid;
 
 use crate::config::AgentConfig;
-use crate::logging::{summarize_json, summarize_text, text_fingerprint};
 use crate::providers::{
-    ChatOptions, ContentPart, ConversationMessage, Provider, Role, StreamEvent, ThinkingBlock,
-    ToolCall, ToolSpec, Usage,
+    ChatOptions, ContentPart, ConversationMessage, MessageMetadata, MessageOrigin, Provider,
+    ProviderResponse, Role, StreamEvent, ThinkingBlock, Usage,
 };
-use crate::tools::{Tool, ToolResult};
+use crate::ptc::parser::PtcRequest;
+use crate::ptc::stream_interceptor::PtcStreamInterceptor;
 use crate::util::fs::atomic_write_text;
-use crate::util::text::TruncateForUi;
 
-struct TurnOutput {
-    text: Option<String>,
+pub struct AssistantTurnResult {
+    pub visible_text: String,
+    pub ptc_requests: Vec<PtcRequest>,
+    pub ptc_parse_notice: Option<String>,
+}
+
+pub struct StreamedTurnOutput {
+    visible_text: String,
+    hidden_ptc: String,
     reasoning_content: Option<String>,
     thinking_blocks: Vec<ThinkingBlock>,
-    tool_calls: Vec<ToolCall>,
     usage: Usage,
-    parse_errors: Vec<(String, String)>,
 }
-
-enum CallStrategy<'a, F: Fn(&str)> {
-    Blocking,
-    Streaming { on_text: &'a F },
-}
-
-type AssistantMessageCallback<'a> = Option<&'a dyn Fn(&str, bool)>;
 
 pub struct TurnSnapshot {
     history: Vec<ConversationMessage>,
     total_usage: Usage,
     conversation_summary: Option<String>,
-    temp_files_len: usize,
 }
 
 pub struct Agent {
@@ -47,7 +40,6 @@ pub struct Agent {
     config: AgentConfig,
     compression_provider: (Arc<dyn Provider>, ChatOptions),
     conversation_summary: Option<String>,
-    temp_files: Vec<PathBuf>,
 }
 
 impl Agent {
@@ -61,7 +53,6 @@ impl Agent {
             config,
             compression_provider,
             conversation_summary: None,
-            temp_files: Vec::new(),
         }
     }
 
@@ -72,15 +63,11 @@ impl Agent {
             ConversationMessage {
                 role: Role::System,
                 content: parts.into_iter().map(ContentPart::Text).collect(),
-                tool_calls: Vec::new(),
                 reasoning_content: None,
                 thinking_blocks: Vec::new(),
+                metadata: MessageMetadata::default(),
             },
         );
-    }
-
-    pub fn push_user_message(&mut self, text: String) {
-        self.history.push(ConversationMessage::user(text));
     }
 
     pub fn snapshot_turn(&self) -> TurnSnapshot {
@@ -88,7 +75,6 @@ impl Agent {
             history: self.history.clone(),
             total_usage: self.total_usage.clone(),
             conversation_summary: self.conversation_summary.clone(),
-            temp_files_len: self.temp_files.len(),
         }
     }
 
@@ -96,7 +82,6 @@ impl Agent {
         self.history = snapshot.history;
         self.total_usage = snapshot.total_usage;
         self.conversation_summary = snapshot.conversation_summary;
-        self.temp_files.truncate(snapshot.temp_files_len);
     }
 
     pub fn take_conversation_summary(&mut self) -> Option<String> {
@@ -106,312 +91,98 @@ impl Agent {
     pub async fn run_turn(
         &mut self,
         provider: &dyn Provider,
-        tools: &[Box<dyn Tool>],
         opts: &ChatOptions,
-    ) -> Result<String> {
-        self.run_turn_inner(
-            provider,
-            tools,
-            opts,
-            CallStrategy::<fn(&str)>::Blocking,
-            None,
-        )
-        .await
+    ) -> Result<AssistantTurnResult> {
+        let response = provider.chat(&self.history, opts).await?;
+        Ok(self.finish_turn(self.process_blocking_response(response)))
     }
 
-    pub async fn run_turn_stream(
-        &mut self,
+    pub async fn collect_turn_stream_output(
+        &self,
         provider: &dyn Provider,
-        tools: &[Box<dyn Tool>],
         opts: &ChatOptions,
         on_text: impl Fn(&str),
-        on_assistant_message: impl Fn(&str, bool),
-    ) -> Result<String> {
-        self.run_turn_inner(
-            provider,
-            tools,
-            opts,
-            CallStrategy::Streaming { on_text: &on_text },
-            Some(&on_assistant_message),
-        )
-        .await
+    ) -> Result<StreamedTurnOutput> {
+        self.consume_stream(provider, &self.history, opts, &on_text)
+            .await
     }
 
-    async fn run_turn_inner<F: Fn(&str)>(
+    pub fn finish_streamed_turn(
         &mut self,
-        provider: &dyn Provider,
-        tools: &[Box<dyn Tool>],
-        opts: &ChatOptions,
-        strategy: CallStrategy<'_, F>,
-        on_assistant_message: AssistantMessageCallback<'_>,
-    ) -> Result<String> {
-        let tool_specs: Vec<ToolSpec> = tools.iter().map(|t| t.spec()).collect();
+        output: StreamedTurnOutput,
+    ) -> Result<AssistantTurnResult> {
+        Ok(self.finish_turn(output))
+    }
 
-        let max_iterations = self.config.max_iterations;
-        for iteration in 0..max_iterations {
-            let request_history = self.sanitized_history_for_provider();
-            let output = match &strategy {
-                CallStrategy::Blocking => {
-                    let response = provider.chat(&request_history, &tool_specs, opts).await?;
-                    TurnOutput {
-                        text: response.text,
-                        reasoning_content: response.reasoning_content,
-                        thinking_blocks: response.thinking_blocks,
-                        tool_calls: response.tool_calls,
-                        usage: response.usage.unwrap_or_default(),
-                        parse_errors: Vec::new(),
-                    }
-                }
-                CallStrategy::Streaming { on_text } => {
-                    self.consume_stream(provider, &request_history, &tool_specs, opts, on_text)
-                        .await?
-                }
-            };
-
-            self.total_usage.input_tokens += output.usage.input_tokens;
-            self.total_usage.output_tokens += output.usage.output_tokens;
-
-            if output.tool_calls.is_empty() && output.parse_errors.is_empty() {
-                let text = output.text.unwrap_or_default();
-                if !text.is_empty() {
-                    if let Some(callback) = on_assistant_message {
-                        callback(&text, false);
-                    }
-                }
-                self.history.push(ConversationMessage {
-                    role: Role::Assistant,
-                    content: if text.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![ContentPart::Text(text.clone())]
-                    },
-                    tool_calls: Vec::new(),
-                    reasoning_content: output.reasoning_content,
-                    thinking_blocks: output.thinking_blocks,
-                });
-                return Ok(text);
-            }
-
-            let error_tool_calls: Vec<ToolCall> = output
-                .parse_errors
-                .iter()
-                .map(|(id, name)| ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: serde_json::json!({}),
-                    extra_content: None,
-                })
-                .collect();
-
-            let TurnOutput {
-                text,
-                reasoning_content,
-                thinking_blocks,
-                tool_calls,
-                parse_errors,
-                ..
-            } = output;
-
-            let (msg_tool_calls, exec_tool_calls) = if parse_errors.is_empty() {
-                (tool_calls.clone(), tool_calls)
-            } else {
-                let exec = tool_calls.clone();
-                let mut msg_calls = tool_calls;
-                msg_calls.extend(error_tool_calls);
-                (msg_calls, exec)
-            };
-
-            let mut assistant_msg = ConversationMessage {
-                role: Role::Assistant,
-                content: Vec::new(),
-                tool_calls: msg_tool_calls,
-                reasoning_content,
-                thinking_blocks,
-            };
-            if let Some(ref text) = text {
-                if !text.is_empty() {
-                    if let Some(callback) = on_assistant_message {
-                        callback(text, true);
-                    }
-                    assistant_msg.content.push(ContentPart::Text(text.clone()));
-                }
-            }
-            self.history.push(assistant_msg);
-
-            for (id, name) in &parse_errors {
-                self.history.push(ConversationMessage::tool_result(
-                    id,
-                    format!("Failed to parse arguments for tool '{name}'. The arguments were malformed JSON."),
-                    true,
-                ));
-            }
-
-            self.process_tool_calls(&exec_tool_calls, tools, iteration, max_iterations)
-                .await;
+    fn process_blocking_response(&self, response: ProviderResponse) -> StreamedTurnOutput {
+        let mut interceptor = PtcStreamInterceptor::new();
+        if let Some(text) = response.text.as_deref() {
+            interceptor.push(text);
         }
+        let (visible_text, hidden_ptc) = interceptor.finish();
+        StreamedTurnOutput {
+            visible_text,
+            hidden_ptc,
+            reasoning_content: response.reasoning_content,
+            thinking_blocks: response.thinking_blocks,
+            usage: response.usage.unwrap_or_default(),
+        }
+    }
 
-        tracing::warn!(
-            summary_kind = "iteration_fallback",
-            max_iterations,
-            history_messages = self.history.len(),
-            "Iteration budget exhausted; generating fallback summary"
-        );
-        let summary = self.generate_iteration_fallback().await;
+    fn finish_turn(&mut self, output: StreamedTurnOutput) -> AssistantTurnResult {
+        self.total_usage.input_tokens += output.usage.input_tokens;
+        self.total_usage.output_tokens += output.usage.output_tokens;
+
+        let parsed = crate::ptc::parser::parse_ptc_requests(&output.hidden_ptc);
+        let (ptc_requests, ptc_parse_notice) = match parsed {
+            Ok(requests) => (requests, None),
+            Err(err) => (
+                Vec::new(),
+                Some(format!(
+                    "<PTC_RUNTIME_NOTICE source=\"runtime\" status=\"error\">{err}</PTC_RUNTIME_NOTICE>"
+                )),
+            ),
+        };
+
         self.history.push(ConversationMessage {
             role: Role::Assistant,
-            content: vec![ContentPart::Text(summary.clone())],
-            tool_calls: Vec::new(),
-            reasoning_content: None,
-            thinking_blocks: Vec::new(),
+            content: if output.visible_text.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentPart::Text(output.visible_text.clone())]
+            },
+            reasoning_content: output.reasoning_content,
+            thinking_blocks: output.thinking_blocks,
+            metadata: MessageMetadata::default(),
         });
-        Ok(summary)
-    }
 
-    async fn generate_iteration_fallback(&self) -> String {
-        let (comp_provider, comp_opts) = &self.compression_provider;
-
-        let mut transcript = String::new();
-        let recent: Vec<&ConversationMessage> = self
-            .history
-            .iter()
-            .filter(|m| !matches!(m.role, Role::System))
-            .rev()
-            .take(10)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let recent_messages = recent.len();
-
-        for msg in &recent {
-            let role_str = match &msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-                Role::ToolResult { .. } => "ToolResult",
-                Role::System => continue,
-            };
-            let text = msg.text_content();
-            let _ = writeln!(transcript, "{role_str}: {text}");
+        AssistantTurnResult {
+            visible_text: output.visible_text,
+            ptc_requests,
+            ptc_parse_notice,
         }
-
-        let transcript_chars = transcript.chars().count();
-        tracing::info!(
-            summary_kind = "iteration_fallback",
-            model = %comp_opts.model,
-            recent_messages,
-            transcript_chars,
-            "Generating iteration fallback summary with compression model"
-        );
-
-        let prompt = format!(
-            "The agent has reached its maximum iteration limit ({max}). \
-             Summarize what has been accomplished, what remains unfinished, \
-             and suggest next steps for the user. \
-             You MUST write the summary in the same language as the user's most recent message. \
-             Be concise.\n\n{transcript}",
-            max = self.config.max_iterations,
-        );
-
-        let messages = vec![ConversationMessage::user(prompt)];
-        match comp_provider.chat(&messages, &[], comp_opts).await {
-            Ok(response) => {
-                let summary = response.text.unwrap_or_else(|| self.static_fallback());
-                tracing::info!(
-                    summary_kind = "iteration_fallback",
-                    model = %comp_opts.model,
-                    summary_chars = summary.chars().count(),
-                    "Iteration fallback summary generated"
-                );
-                summary
-            }
-            Err(e) => {
-                tracing::warn!(
-                    summary_kind = "iteration_fallback",
-                    model = %comp_opts.model,
-                    "Failed to generate iteration fallback summary: {e}"
-                );
-                self.static_fallback()
-            }
-        }
-    }
-
-    fn static_fallback(&self) -> String {
-        format!(
-            "Reached the maximum iteration limit ({}). \
-             Some work may be incomplete. Please review the conversation \
-             and continue with a follow-up message if needed.",
-            self.config.max_iterations,
-        )
     }
 
     async fn consume_stream(
         &self,
         provider: &dyn Provider,
         messages: &[ConversationMessage],
-        tool_specs: &[ToolSpec],
         opts: &ChatOptions,
         on_text: &dyn Fn(&str),
-    ) -> Result<TurnOutput> {
-        let mut stream = provider.chat_stream(messages, tool_specs, opts).await?;
-
-        let mut text_buf = String::new();
+    ) -> Result<StreamedTurnOutput> {
+        let mut stream = provider.chat_stream(messages, opts).await?;
+        let mut interceptor = PtcStreamInterceptor::new();
         let mut reasoning_buf = String::new();
         let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
-        let mut tool_starts: Vec<(String, String, Option<serde_json::Value>)> = Vec::new();
-        let mut tool_args: HashMap<String, String> = HashMap::new();
-        let mut last_tool_call_id: Option<String> = None;
         let mut usage = Usage::default();
 
         while let Some(event) = stream.next().await {
             match event? {
                 StreamEvent::TextDelta(delta) => {
-                    on_text(&delta);
-                    text_buf.push_str(&delta);
-                }
-                StreamEvent::ToolCallStart {
-                    id,
-                    name,
-                    extra_content,
-                } => {
-                    let resolved_id = if id.trim().is_empty() {
-                        let generated_id = format!("tool_call_auto_{}", tool_starts.len());
-                        tracing::warn!(
-                            generated_id = %generated_id,
-                            "ToolCallStart event missing id; generated fallback id"
-                        );
-                        generated_id
-                    } else {
-                        id
-                    };
-                    last_tool_call_id = Some(resolved_id.clone());
-                    tool_starts.push((resolved_id.clone(), name, extra_content));
-                    tool_args.entry(resolved_id).or_default();
-                }
-                StreamEvent::ToolCallDelta { id, args_chunk } => {
-                    let resolved_id = if id.trim().is_empty() {
-                        match last_tool_call_id.clone() {
-                            Some(last_id) => {
-                                tracing::debug!(
-                                    fallback_tool_call_id = %last_id,
-                                    "ToolCallDelta event missing id; falling back to last started tool call id"
-                                );
-                                last_id
-                            }
-                            None => {
-                                tracing::warn!(
-                                    "ToolCallDelta event missing id and no previous tool call id is available; dropping args chunk"
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        id
-                    };
-                    last_tool_call_id = Some(resolved_id.clone());
-                    tool_args
-                        .entry(resolved_id)
-                        .or_default()
-                        .push_str(&args_chunk);
+                    let visible = interceptor.push(&delta);
+                    if !visible.is_empty() {
+                        on_text(&visible);
+                    }
                 }
                 StreamEvent::AssistantMeta(meta) => {
                     let kind = meta.get("kind").and_then(serde_json::Value::as_str);
@@ -428,7 +199,9 @@ impl Agent {
                                 match serde_json::from_value::<ThinkingBlock>(block.clone()) {
                                     Ok(tb) => thinking_blocks.push(tb),
                                     Err(e) => {
-                                        tracing::warn!("Failed to parse thinking block from stream metadata: {e}");
+                                        tracing::warn!(
+                                            "Failed to parse thinking block from stream metadata: {e}"
+                                        );
                                     }
                                 }
                             }
@@ -442,153 +215,20 @@ impl Agent {
             }
         }
 
-        let mut tool_calls = Vec::new();
-        let mut parse_errors = Vec::new();
-        for (id, name, extra_content) in tool_starts {
-            let raw = tool_args.remove(&id).unwrap_or_default();
-            match serde_json::from_str(&raw) {
-                Ok(arguments) => tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                    extra_content,
-                }),
-                Err(e) => {
-                    tracing::warn!(
-                        tool = %name,
-                        tool_call_id = %id,
-                        raw = %summarize_text(&raw),
-                        "Failed to parse tool args: {e}"
-                    );
-                    parse_errors.push((id, name));
-                }
-            }
-        }
-
-        let text = if text_buf.is_empty() {
-            None
-        } else {
-            Some(text_buf)
-        };
+        let (visible_text, hidden_ptc) = interceptor.finish();
         let reasoning_content = if reasoning_buf.is_empty() {
             None
         } else {
             Some(reasoning_buf)
         };
 
-        Ok(TurnOutput {
-            text,
+        Ok(StreamedTurnOutput {
+            visible_text,
+            hidden_ptc,
             reasoning_content,
             thinking_blocks,
-            tool_calls,
             usage,
-            parse_errors,
         })
-    }
-
-    async fn process_tool_calls(
-        &mut self,
-        tool_calls: &[ToolCall],
-        tools: &[Box<dyn Tool>],
-        iteration: usize,
-        max_iterations: usize,
-    ) {
-        let tool_map: HashMap<&str, &dyn Tool> =
-            tools.iter().map(|t| (t.name(), t.as_ref())).collect();
-        let mut idx = 0;
-
-        while idx < tool_calls.len() {
-            let tc = &tool_calls[idx];
-            let is_safe = tool_map
-                .get(tc.name.as_str())
-                .is_some_and(|tool| tool.is_safe_for_concurrent());
-
-            if !is_safe {
-                let result = self.execute_with_timeout(&tool_map, tc).await;
-                self.push_tool_result(tc, result, iteration, max_iterations);
-                idx += 1;
-                continue;
-            }
-
-            let batch_start = idx;
-            idx += 1;
-            while idx < tool_calls.len() {
-                let next = &tool_calls[idx];
-                let next_safe = tool_map
-                    .get(next.name.as_str())
-                    .is_some_and(|tool| tool.is_safe_for_concurrent());
-                if !next_safe {
-                    break;
-                }
-                idx += 1;
-            }
-
-            let batch = &tool_calls[batch_start..idx];
-            let futures: Vec<_> = batch
-                .iter()
-                .map(|call| self.execute_with_timeout(&tool_map, call))
-                .collect();
-            let results = futures::future::join_all(futures).await;
-            for (call, result) in batch.iter().zip(results) {
-                self.push_tool_result(call, result, iteration, max_iterations);
-            }
-        }
-    }
-
-    fn push_tool_result(
-        &mut self,
-        tc: &ToolCall,
-        result: ToolResult,
-        iteration: usize,
-        max_iterations: usize,
-    ) {
-        let output = if result.output.len() > self.config.max_tool_output_chars {
-            let path = std::env::temp_dir().join(format!("zerda-tool-{}.txt", Uuid::new_v4()));
-            match std::fs::write(&path, &result.output) {
-                Ok(()) => {
-                    let len = result.output.len();
-                    self.temp_files.push(path.clone());
-                    format!(
-                        "[Tool output too large ({len} chars), saved to {path}. \
-                         Use `delegate_to_executor` and pass this file path in the instruction for deep processing.]",
-                        path = path.display()
-                    )
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to save tool output to temp file: {e}");
-                    result
-                        .output
-                        .truncate_for_ui(self.config.max_tool_output_chars)
-                }
-            }
-        } else {
-            result.output
-        };
-
-        let display_iter = iteration + 1;
-        let mut tagged = format!("{output}\n[Iteration {display_iter}/{max_iterations}]");
-
-        if max_iterations > 1 {
-            if iteration + 1 == max_iterations * 9 / 10 {
-                tagged.push_str(
-                    "\n[Warning] Nearly out of iterations. Focus only on the most critical remaining work.",
-                );
-            } else if iteration + 1 == max_iterations * 3 / 4 {
-                tagged.push_str(
-                    "\n[Warning] 75% budget consumed. Prioritize essential steps and avoid exploratory actions.",
-                );
-            } else if iteration + 1 == max_iterations / 2 {
-                tagged.push_str(
-                    "\n[Warning] Half of iteration budget used. Consider reviewing your approach.",
-                );
-            }
-        }
-
-        self.history.push(ConversationMessage::tool_result(
-            &tc.id,
-            tagged,
-            result.is_error,
-        ));
     }
 
     pub async fn auto_compact(&mut self, memory_dir: &Path) -> Result<bool> {
@@ -629,12 +269,7 @@ impl Agent {
         let mut transcript = String::new();
         for &i in &indices_to_compact {
             let msg = &self.history[i];
-            let role_str = match &msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-                Role::ToolResult { .. } => "ToolResult",
-                Role::System => continue,
-            };
+            let role_str = transcript_role(msg);
             let text = msg.text_content();
             let _ = writeln!(transcript, "{role_str}: {text}");
         }
@@ -648,40 +283,24 @@ impl Agent {
         let nanos = duration.subsec_nanos();
         let compaction_path = compaction_dir.join(format!("{ms}-{nanos:08x}.txt"));
         std::fs::write(&compaction_path, &transcript)?;
-        tracing::info!(
-            summary_kind = "history_compaction",
-            path = %compaction_path.display(),
-            "Saved full transcript before compaction"
-        );
 
         let (comp_provider, comp_opts) = &self.compression_provider;
-
         let prompt = format!(
             "Summarize this conversation into concise context for future turns. \
              Preserve: user preferences, commitments, decisions, unresolved tasks, key facts. \
-             Omit: filler, repeated chit-chat, verbose tool logs. \
+             Omit: filler, repeated chit-chat, raw XML protocol blocks, verbose logs. \
              Output plain text bullet points only.\n\n{transcript}"
         );
-
-        tracing::info!(
-            summary_kind = "history_compaction",
-            model = %comp_opts.model,
-            compacted_messages = indices_to_compact.len(),
-            transcript_chars = transcript.chars().count(),
-            "Generating history compaction summary with compression model"
-        );
-
         let messages = vec![ConversationMessage::user(prompt)];
-        let response = comp_provider.chat(&messages, &[], comp_opts).await?;
-
+        let response = comp_provider.chat(&messages, comp_opts).await?;
         let summary = response.text.unwrap_or_default();
         if summary.is_empty() {
             anyhow::bail!("Empty compression summary");
         }
 
-        let compaction_hint = format!(
+        let hint = format!(
             "\n\nThe full conversation transcript before compaction was saved to: {path}\n\
-             To retrieve specific details, use `delegate_to_executor` and include this file path in the instruction. Do NOT inline the entire file in planner context.",
+             Refer to that file via a later PTC task if specific detail is needed.",
             path = compaction_path.display()
         );
 
@@ -693,79 +312,8 @@ impl Agent {
             idx += 1;
             keep
         });
-
-        self.conversation_summary = Some(format!("{summary}{compaction_hint}"));
-
-        tracing::info!(
-            summary_kind = "history_compaction",
-            model = %comp_opts.model,
-            summary_chars = self
-                .conversation_summary
-                .as_ref()
-                .map(|s| s.chars().count())
-                .unwrap_or(0),
-            remaining_history_messages = self.history.len(),
-            "History compaction summary generated"
-        );
-
+        self.conversation_summary = Some(format!("{summary}{hint}"));
         Ok(())
-    }
-
-    fn sanitized_history_for_provider(&self) -> Vec<ConversationMessage> {
-        let mut sanitized = Vec::with_capacity(self.history.len());
-        let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut dropped_orphan_tool_results = 0usize;
-
-        for msg in &self.history {
-            match &msg.role {
-                Role::System | Role::User => {
-                    pending.clear();
-                    sanitized.push(msg.clone());
-                }
-                Role::Assistant => {
-                    pending.clear();
-                    for tc in &msg.tool_calls {
-                        pending.insert(tc.id.clone());
-                    }
-                    sanitized.push(msg.clone());
-                }
-                Role::ToolResult { tool_call_id, .. } => {
-                    if pending.contains(tool_call_id) {
-                        pending.remove(tool_call_id);
-                        sanitized.push(msg.clone());
-                    } else {
-                        dropped_orphan_tool_results += 1;
-                    }
-                }
-            }
-        }
-
-        if dropped_orphan_tool_results > 0 {
-            tracing::warn!(
-                dropped_orphan_tool_results,
-                history_messages = self.history.len(),
-                sanitized_messages = sanitized.len(),
-                "Dropped orphan tool result messages before provider request"
-            );
-        }
-
-        sanitized
-    }
-
-    async fn execute_with_timeout(
-        &self,
-        tool_map: &HashMap<&str, &dyn Tool>,
-        call: &ToolCall,
-    ) -> ToolResult {
-        let fut = execute_tool(tool_map, call);
-        let timeout_secs = self.config.tool_timeout;
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
-            Ok(result) => result,
-            Err(_) => ToolResult {
-                output: format!("Tool '{}' timed out after {timeout_secs}s", call.name),
-                is_error: true,
-            },
-        }
     }
 
     pub fn save_session(&self, sessions_dir: &Path, id: Option<&str>) -> Result<String> {
@@ -846,80 +394,12 @@ impl Agent {
     }
 }
 
-impl Drop for Agent {
-    fn drop(&mut self) {
-        for path in &self.temp_files {
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::debug!("Failed to clean up temp file {}: {e}", path.display());
-            }
-        }
+fn transcript_role(msg: &ConversationMessage) -> &'static str {
+    match (&msg.role, &msg.metadata.origin) {
+        (Role::System, _) => "System",
+        (Role::Assistant, _) => "Assistant",
+        (Role::User, MessageOrigin::Human) => "User",
+        (Role::User, MessageOrigin::RuntimePtcResult) => "RuntimeResult",
+        (Role::User, MessageOrigin::RuntimePtcNotice) => "RuntimeNotice",
     }
-}
-
-async fn execute_tool(tool_map: &HashMap<&str, &dyn Tool>, call: &ToolCall) -> ToolResult {
-    let started = Instant::now();
-    if tracing::enabled!(tracing::Level::DEBUG) {
-        tracing::debug!(
-            tool = %call.name,
-            tool_call_id = %call.id,
-            args = %summarize_tool_args(&call.name, &call.arguments),
-            "Tool start"
-        );
-    }
-    if let Some(tool) = tool_map.get(call.name.as_str()) {
-        match tool.execute(call.arguments.clone()).await {
-            Ok(result) => {
-                tracing::debug!(
-                    tool = %call.name,
-                    tool_call_id = %call.id,
-                    is_error = result.is_error,
-                    output_len = result.output.len(),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Tool done"
-                );
-                result
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tool = %call.name,
-                    tool_call_id = %call.id,
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Tool execution error: {e}"
-                );
-                ToolResult {
-                    output: format!("Tool execution error: {e}"),
-                    is_error: true,
-                }
-            }
-        }
-    } else {
-        ToolResult {
-            output: format!("Unknown tool: {}", call.name),
-            is_error: true,
-        }
-    }
-}
-
-fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
-    if tool_name == "shell" {
-        if let Some(command) = args.get("command").and_then(serde_json::Value::as_str) {
-            return format!(
-                "shell(command_chars={},command_fp={},command_preview={})",
-                command.chars().count(),
-                text_fingerprint(command),
-                shell_command_preview(command)
-            );
-        }
-    }
-    summarize_json(args)
-}
-
-fn shell_command_preview(command: &str) -> String {
-    const MAX_CHARS: usize = 180;
-    let total = command.chars().count();
-    let mut preview: String = command.chars().take(MAX_CHARS).collect();
-    if total > MAX_CHARS {
-        preview.push('…');
-    }
-    format!("{preview:?}")
 }

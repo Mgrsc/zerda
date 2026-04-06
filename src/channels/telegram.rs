@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use tokio::sync::mpsc;
 
-use super::{Channel, ChannelMessage};
+use super::{Channel, ChannelMessage, ChannelMessageOrigin};
 use crate::logging::summarize_text;
 use crate::providers::ContentPart;
 use crate::rich_content::{self, RichSegment};
@@ -42,6 +42,7 @@ impl TelegramRecipient {
             },
             Err(err) => {
                 tracing::warn!(
+                    event = "telegram.recipient.parse.error",
                     recipient = raw,
                     thread_id = thread_id_raw,
                     "Invalid Telegram recipient thread id: {err}"
@@ -145,9 +146,8 @@ fn find_markdown_safe_split(window: &str) -> Option<usize> {
                 backtick_run = 0;
             }
             continue;
-        } else {
-            backtick_run = 0;
         }
+        backtick_run = 0;
 
         if in_code_block {
             continue;
@@ -929,6 +929,7 @@ impl Channel for TelegramChannel {
         let target = TelegramRecipient::parse(recipient);
         if !target.is_private_chat() {
             tracing::debug!(
+                event = "telegram.stream.non_private_fallback",
                 chat_id = %target.chat_id,
                 message_thread_id = ?target.message_thread_id,
                 "Telegram stream fallback to non-stream for non-private chat"
@@ -940,6 +941,7 @@ impl Channel for TelegramChannel {
         match self.send_message_draft(&target, draft_id, text).await {
             Ok(()) => {
                 tracing::debug!(
+                    event = "telegram.stream.start",
                     chat_id = %target.chat_id,
                     message_thread_id = ?target.message_thread_id,
                     draft_id,
@@ -949,6 +951,7 @@ impl Channel for TelegramChannel {
             }
             Err(e) => {
                 tracing::warn!(
+                    event = "telegram.stream.start.error",
                     chat_id = %target.chat_id,
                     message_thread_id = ?target.message_thread_id,
                     draft_id,
@@ -968,6 +971,7 @@ impl Channel for TelegramChannel {
         let target = TelegramRecipient::parse(recipient);
         let Some(draft_id) = parse_draft_stream_id(message_id) else {
             tracing::error!(
+                event = "telegram.stream.message_id.invalid",
                 chat_id = %target.chat_id,
                 message_thread_id = ?target.message_thread_id,
                 message_id,
@@ -982,6 +986,7 @@ impl Channel for TelegramChannel {
             return Ok(());
         }
         tracing::debug!(
+            event = "telegram.stream.finalized",
             chat_id = %target.chat_id,
             message_thread_id = ?target.message_thread_id,
             draft_id,
@@ -997,7 +1002,10 @@ impl Channel for TelegramChannel {
 
         let mut offset: i64 = 0;
 
-        tracing::info!("Telegram channel listening for messages...");
+        tracing::info!(
+            event = "telegram.listen.start",
+            "Telegram channel listening for messages..."
+        );
 
         loop {
             let url = self.api_url("getUpdates");
@@ -1010,7 +1018,7 @@ impl Channel for TelegramChannel {
             let resp = match self.client.post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("Telegram poll error: {e}");
+                    tracing::warn!(event = "telegram.poll.error", "Telegram poll error: {e}");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
@@ -1019,7 +1027,10 @@ impl Channel for TelegramChannel {
             let data: serde_json::Value = match resp.json().await {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("Telegram parse error: {e}");
+                    tracing::warn!(
+                        event = "telegram.poll.parse_error",
+                        "Telegram parse error: {e}"
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
@@ -1162,6 +1173,8 @@ impl Channel for TelegramChannel {
                         content,
                         content_parts,
                         channel: "telegram".to_string(),
+                        origin: ChannelMessageOrigin::Human,
+                        related_job_id: None,
                     })
                     .await
                 {
@@ -1192,7 +1205,7 @@ mod tests {
 
     #[test]
     fn split_message_handles_zero_limit() {
-        let input = "你好 world 😀";
+        let input = "hello world 😀";
         let chunks = split_message(input, 0);
         assert!(!chunks.is_empty());
         assert_eq!(chunks.concat(), input);

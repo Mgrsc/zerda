@@ -1,19 +1,25 @@
 # Getting Started
 
-## Installation
-
-Zerda is a Rust application. Build from source:
+## Build
 
 ```bash
 cargo build --release
 ```
 
-The binary is located at `target/release/zerda`.
+Binary output:
+
+```text
+target/release/zerda
+```
 
 ## Quick Start
 
-1. Copy `.env.example` to `.env` and fill in your API keys.
-2. Create a minimal config file at `~/.zerda/zerda.toml`:
+1. Copy `.env.example` to `.env` and fill in API keys.
+2. For the bundled Compose stack, use the repository `zerda.toml`.
+3. For bare-metal runs, copy `zerda.toml.full` to `~/.zerda/zerda.toml`.
+4. Copy `identity.md` to `~/.zerda/identity.md`.
+
+Minimal config:
 
 ```toml
 [providers.openai]
@@ -25,61 +31,51 @@ model = "openai@gpt-4o"
 vision = true
 ```
 
-3. Run Zerda:
+Run:
 
 ```bash
-# Interactive mode
 zerda
-
-# Single-turn mode
 zerda run -m "Hello"
-
-# Resume a previous session
 zerda run --resume
-
-# Start background services (Telegram bot)
 zerda serve
 ```
 
-## Config File Resolution Order
+Compose quick start:
 
-1. `--config` / `-c` CLI argument
-2. `$ZERDA_CONFIG` environment variable
-3. `~/.zerda/zerda.toml` (default fallback)
-
-## Directory Structure
-
-Zerda uses `~/.zerda/` as its home directory:
-
+```bash
+cp .env.example .env
+docker compose up -d --build
 ```
+
+## Config Resolution
+
+1. `--config`
+2. `ZERDA_CONFIG`
+3. `~/.zerda/zerda.toml`
+
+## Runtime Home Layout
+
+```text
 ~/.zerda/
-├── zerda.toml          # Main configuration
-├── mcp.toml            # MCP server configurations (optional)
-├── identity.md         # Agent personality definition
-├── memory/             # Internal runtime artifacts (e.g. compaction snapshots)
-├── sessions/           # Conversation history per session
-├── skills/             # Skill definitions
-│   └── skill-name/
-│       └── SKILL.md
-└── executor_jobs/      # Executor artifacts
-    └── YYYYMMDD/
-        └── HHMMSS_task-slug/
+├── zerda.toml
+├── identity.md
+├── sessions/
+└── ptc_jobs/
 ```
 
-## Generate Full Config Template
-
-To see all available configuration options with documentation:
+## Full Template
 
 ```bash
 zerda config generate
 ```
 
-This prints the comprehensive `zerda.toml.full` template to stdout.
+Repository config note:
 
-## Validate Configuration
+- `zerda.toml`: minimal Compose-ready config with memory enabled and Chroma at `http://chroma:8000`
+- `zerda.toml.full`: full template for bare-metal or custom deployments
+
+## Validate Config
 
 ```bash
 zerda config validate
 ```
-
-Checks the active config file for errors and exits.

@@ -2,9 +2,9 @@
 
 ## CLI Commands
 
-### `zerda` (default: interactive mode)
+### `zerda`
 
-Enter interactive chat mode for multi-turn conversations. Session-based with automatic persistence.
+Interactive multi-turn chat:
 
 ```bash
 zerda
@@ -13,22 +13,17 @@ zerda --config /path/to/zerda.toml
 
 ### `zerda run`
 
-Execute in specific modes:
+One-shot or resumed execution:
 
 ```bash
-# Single-turn mode: execute one instruction and exit
-zerda run -m "What is the weather today?"
-
-# Resume the latest session
+zerda run -m "List files in this repo"
 zerda run --resume
-
-# Resume a specific session by ID
 zerda run --resume <session_id>
 ```
 
 ### `zerda serve`
 
-Start background services (Telegram bot, channel listeners). Runs indefinitely.
+Start configured remote channels:
 
 ```bash
 zerda serve
@@ -37,43 +32,45 @@ zerda serve
 ### `zerda config`
 
 ```bash
-# Print full example config with all options documented
 zerda config generate
-
-# Validate the active config and exit
 zerda config validate
 ```
 
-## Interactive Commands (in chat)
-
-These commands are available during an interactive session:
+## Interactive Commands
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `/help` | Show available commands |
-| `/model` | View current active model and available providers |
-| `/model <provider_id>@<model_name>` | Switch model at runtime (e.g., `/model openai@gpt-4o`) |
+| `/model` | View current active model and providers |
+| `/model <provider_id>@<model_name>` | Switch model at runtime |
 | `/model <provider_id> list` | List available models for a provider |
-| `/clear` | Clear conversation history and reset token usage |
-| `/compact` | Force context compression manually |
-| `/status` | Display session status (tokens, tools, skills, todos, system info) |
-| `/cancel` | Cancel the currently running turn |
+| `/clear` | Clear conversation history and token usage |
+| `/compact` | Force context compression |
+| `/status` | Display token usage and runtime state |
+| `/jobs` | List current session PTC jobs |
+| `/job <id>` | Inspect one PTC job |
+| `/cancel-job <id>` | Cancel a running PTC job |
+| `/cancel` | Cancel the current running turn |
 | `/exit` or `/quit` | Exit the interactive session |
 
-## Switching Models
+## Busy Turn Behavior
 
-### Runtime Switch (temporary, current session only)
+- `/status`, `/jobs`, `/job <id>`, and `/cancel-job <id>` execute immediately while a turn is streaming.
+- `/compact` is queued and runs after the active turn finishes.
+- `/clear` and `/model <provider>@<model>` cancel the active turn first, then execute.
+- `/model` without arguments still returns immediately.
+- `/model <provider> list` is queued while a turn is active because provider lookup still needs mutable runtime state.
 
-```
+## Model Switching
+
+Temporary session switch:
+
+```text
 /model openai@gpt-4o-mini
-/model anthropic@claude-3-5-sonnet-20241022
+/model anthropic@claude-4-sonnet
 ```
 
-This takes effect immediately for the current session without needing a config reload.
-
-### Persistent Switch (edit config)
-
-Change `primary_model` in `zerda.toml`:
+Persistent switch:
 
 ```toml
 [agent.primary_model]
@@ -81,21 +78,4 @@ model = "openai@gpt-4o-mini"
 vision = true
 ```
 
-Then either restart Zerda or use the `reload` tool with `mode='full'`.
-
-### List Available Models
-
-```
-/model openai list
-```
-
-Queries the provider's model listing endpoint. Not all providers support this (Anthropic may return 404).
-
-## Reload Configuration
-
-The `reload` tool (called by the agent) supports two modes:
-
-- **`light` mode**: Reloads MCP servers, skills, identity/prompts in-place. Fast, no restart needed.
-- **`full` mode**: Full process restart. Required for changes to providers, channels, STT, TTS settings.
-
-The agent can be asked to reload: "reload your config" or "reload MCP servers".
+Then restart Zerda.

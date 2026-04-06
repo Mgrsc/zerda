@@ -1,14 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-
-use std::collections::HashMap;
 
 use super::{
     apply_sampling_mode, build_openai_content_parts, extract_model_ids, initial_sampling_mode,
     is_dual_sampling_conflict_error, preferred_single_sampling_mode, sse_stream, truncate_for_log,
     ChatOptions, ContentPart, ConversationMessage, HttpClient, Provider, ProviderResponse, Role,
-    SamplingMode, StreamEvent, StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    SamplingMode, StreamEvent, StreamResult, ThinkingBlock, Usage,
 };
 use crate::config::ProviderEndpoint;
 
@@ -23,12 +21,7 @@ impl OpenAiResponsesProvider {
         }
     }
 
-    fn build_request(
-        &self,
-        messages: &[ConversationMessage],
-        tools: &[ToolSpec],
-        opts: &ChatOptions,
-    ) -> Value {
+    fn build_request(&self, messages: &[ConversationMessage], opts: &ChatOptions) -> Value {
         let mut instructions: Option<String> = None;
         let mut input: Vec<Value> = Vec::new();
 
@@ -73,30 +66,6 @@ impl OpenAiResponsesProvider {
                             "content": content
                         }));
                     }
-                    for tc in &msg.tool_calls {
-                        input.push(json!({
-                            "type": "function_call",
-                            "call_id": tc.id,
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string()
-                        }));
-                    }
-                }
-                Role::ToolResult {
-                    tool_call_id,
-                    is_error,
-                } => {
-                    let text = msg.text_content();
-                    let output = if *is_error {
-                        format!("[ERROR] {text}")
-                    } else {
-                        text
-                    };
-                    input.push(json!({
-                        "type": "function_call_output",
-                        "call_id": tool_call_id,
-                        "output": output
-                    }));
                 }
             }
         }
@@ -114,68 +83,24 @@ impl OpenAiResponsesProvider {
             body["instructions"] = json!(inst);
         }
 
-        if !tools.is_empty() {
-            let tool_defs: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": "function",
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters
-                    })
-                })
-                .collect();
-            body["tools"] = json!(tool_defs);
-        }
-
         body
     }
 
     fn parse_response(body: &Value) -> Result<ProviderResponse> {
         let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         if let Some(output) = body.get("output").and_then(|o| o.as_array()) {
             for item in output {
-                match item.get("type").and_then(|t| t.as_str()) {
-                    Some("message") => {
-                        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                            for block in content {
-                                if block.get("type").and_then(|t| t.as_str()) == Some("output_text")
-                                {
-                                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                        text_parts.push(t.to_string());
-                                    }
+                if let Some("message") = item.get("type").and_then(|t| t.as_str()) {
+                    if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                        for block in content {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                    text_parts.push(t.to_string());
                                 }
                             }
                         }
                     }
-                    Some("function_call") => {
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = item
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments_str = item
-                            .get("arguments")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("{}");
-                        let arguments: Value = serde_json::from_str(arguments_str)
-                            .context("Failed to parse function_call arguments")?;
-                        tool_calls.push(ToolCall {
-                            id: call_id,
-                            name,
-                            arguments,
-                            extra_content: None,
-                        });
-                    }
-                    _ => {}
                 }
             }
         }
@@ -191,9 +116,8 @@ impl OpenAiResponsesProvider {
         };
 
         tracing::debug!(
-            "OpenAI Responses response: has_text={}, tool_calls={}",
-            text.as_ref().is_some_and(|t| !t.is_empty()),
-            tool_calls.len()
+            "OpenAI Responses response: has_text={}",
+            text.as_ref().is_some_and(|t| !t.is_empty())
         );
         if let Some(ref u) = usage {
             tracing::info!(
@@ -205,7 +129,6 @@ impl OpenAiResponsesProvider {
 
         Ok(ProviderResponse {
             text,
-            tool_calls,
             usage,
             reasoning_content: None,
             thinking_blocks: Vec::<ThinkingBlock>::new(),
@@ -218,10 +141,9 @@ impl Provider for OpenAiResponsesProvider {
     async fn chat(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse> {
-        let mut body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, opts);
         let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
         apply_sampling_mode(&mut body, opts, sampling_mode);
         let url = format!("{}/responses", self.http.base_url);
@@ -265,10 +187,9 @@ impl Provider for OpenAiResponsesProvider {
     async fn chat_stream(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
-        let mut body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, opts);
         let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
         apply_sampling_mode(&mut body, opts, sampling_mode);
         body["stream"] = json!(true);
@@ -310,11 +231,9 @@ impl Provider for OpenAiResponsesProvider {
             }
         };
 
-        Ok(sse_stream(
-            resp.bytes_stream(),
-            HashMap::<String, String>::new(),
-            |block, state| parse_responses_sse(block, state).into_iter().collect(),
-        ))
+        Ok(sse_stream(resp.bytes_stream(), (), |block, state| {
+            parse_responses_sse(block, state).into_iter().collect()
+        }))
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
@@ -334,10 +253,7 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
-fn parse_responses_sse(
-    block: &str,
-    state: &mut HashMap<String, String>,
-) -> Option<Result<StreamEvent>> {
+fn parse_responses_sse(block: &str, _: &mut ()) -> Option<Result<StreamEvent>> {
     let mut event_type = "";
     let mut data_str = String::new();
 
@@ -368,50 +284,6 @@ fn parse_responses_sse(
             let text = data.get("delta")?.as_str()?.to_string();
             Some(Ok(StreamEvent::TextDelta(text)))
         }
-        "response.output_item.added" => {
-            let item = data.get("item")?;
-            if item.get("type").and_then(Value::as_str) != Some("function_call") {
-                return None;
-            }
-            let call_id = item.get("call_id")?.as_str()?.to_string();
-            let item_id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if !item_id.is_empty() {
-                state.insert(item_id, call_id.clone());
-            }
-            state.insert("_last".to_string(), call_id.clone());
-            tracing::info!("OpenAI Responses tool call start: {name}");
-            Some(Ok(StreamEvent::ToolCallStart {
-                id: call_id,
-                name,
-                extra_content: None,
-            }))
-        }
-        "response.function_call_arguments.delta" => {
-            let chunk = data.get("delta")?.as_str()?.to_string();
-            let item_id = data
-                .get("item_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let id = if item_id.is_empty() {
-                state.get("_last").cloned().unwrap_or_default()
-            } else {
-                state.get(&item_id).cloned().unwrap_or(item_id)
-            };
-            Some(Ok(StreamEvent::ToolCallDelta {
-                id,
-                args_chunk: chunk,
-            }))
-        }
         "response.completed" => {
             let usage = data
                 .get("response")
@@ -419,9 +291,11 @@ fn parse_responses_sse(
                 .map(|u| Usage::from_json(u, "input_tokens", "output_tokens"))
                 .unwrap_or_default();
             tracing::info!(
-                "OpenAI Responses stream done: in={}, out={}",
-                usage.input_tokens,
-                usage.output_tokens
+                event = "provider.chat.stream.done",
+                provider = "openai_responses",
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                "OpenAI Responses stream done"
             );
             Some(Ok(StreamEvent::Done(usage)))
         }

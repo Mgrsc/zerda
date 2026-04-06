@@ -17,19 +17,6 @@ if [ -f "$PACKAGES_FILE" ] && [ -s "$PACKAGES_FILE" ]; then
     echo "[supervisor] Package restoration complete."
 fi
 
-BUNDLED_SKILLS="/usr/local/share/zerda/skills"
-USER_SKILLS="/root/.zerda/skills"
-if [ -d "$BUNDLED_SKILLS" ]; then
-    mkdir -p "$USER_SKILLS"
-    for skill_dir in "$BUNDLED_SKILLS"/*/; do
-        skill_name=$(basename "$skill_dir")
-        if [ ! -e "$USER_SKILLS/$skill_name" ]; then
-            cp -r "$skill_dir" "$USER_SKILLS/$skill_name"
-            echo "[supervisor] Installed bundled skill: $skill_name"
-        fi
-    done
-fi
-
 BUNDLED_DOCS="/usr/local/share/zerda/docs/zerda"
 USER_DOCS="/root/.zerda/docs/zerda"
 if [ -d "$BUNDLED_DOCS" ] && [ ! -d "$USER_DOCS" ]; then
@@ -71,13 +58,6 @@ while true; do
     if [ "$exit_code" -eq 0 ]; then
         echo "[supervisor] zerda exited normally."
         exit 0
-    fi
-
-    if [ "$exit_code" -eq 75 ]; then
-        echo "[supervisor] Reload requested (exit 75). Restarting immediately..."
-        backoff=1
-        restart_count=0
-        continue
     fi
 
     if [ "$runtime" -ge "$STABLE_RUNTIME" ]; then

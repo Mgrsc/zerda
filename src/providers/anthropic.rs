@@ -8,7 +8,7 @@ use super::{
     apply_sampling_mode, initial_sampling_mode, is_dual_sampling_conflict_error,
     preferred_single_sampling_mode, sse_stream, truncate_for_log, ChatOptions, ContentPart,
     ConversationMessage, HttpClient, Provider, ProviderResponse, Role, SamplingMode, StreamEvent,
-    StreamResult, ThinkingBlock, ToolCall, ToolSpec, Usage,
+    StreamResult, ThinkingBlock, Usage,
 };
 use crate::config::ProviderEndpoint;
 
@@ -23,12 +23,7 @@ impl AnthropicProvider {
         }
     }
 
-    fn build_request(
-        &self,
-        messages: &[ConversationMessage],
-        tools: &[ToolSpec],
-        opts: &ChatOptions,
-    ) -> Value {
+    fn build_request(&self, messages: &[ConversationMessage], opts: &ChatOptions) -> Value {
         let mut system_parts: Vec<ContentPart> = Vec::new();
         let mut api_messages: Vec<Value> = Vec::new();
 
@@ -51,38 +46,12 @@ impl AnthropicProvider {
                     if !text.is_empty() {
                         content.push(json!({ "type": "text", "text": text }));
                     }
-                    for tc in &msg.tool_calls {
-                        content.push(json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments
-                        }));
-                    }
                     if !content.is_empty() {
                         api_messages.push(json!({
                             "role": "assistant",
                             "content": content
                         }));
                     }
-                }
-                Role::ToolResult {
-                    tool_call_id,
-                    is_error,
-                } => {
-                    let text = msg.text_content();
-                    let mut block = json!({
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": text
-                    });
-                    if *is_error {
-                        block["is_error"] = json!(true);
-                    }
-                    api_messages.push(json!({
-                        "role": "user",
-                        "content": [block]
-                    }));
                 }
             }
         }
@@ -110,20 +79,6 @@ impl AnthropicProvider {
             } else {
                 body["system"] = Self::build_content_parts(&system_parts);
             }
-        }
-
-        if !tools.is_empty() {
-            let tool_defs: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters
-                    })
-                })
-                .collect();
-            body["tools"] = json!(tool_defs);
         }
 
         body
@@ -178,7 +133,6 @@ impl AnthropicProvider {
 
     fn parse_response(body: &Value) -> ProviderResponse {
         let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut thinking_blocks: Vec<ThinkingBlock> = Vec::new();
 
         if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
@@ -216,25 +170,6 @@ impl AnthropicProvider {
                             text_parts.push(t.to_string());
                         }
                     }
-                    Some("tool_use") => {
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments = block.get("input").cloned().unwrap_or(json!({}));
-                        tool_calls.push(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            extra_content: None,
-                        });
-                    }
                     _ => {}
                 }
             }
@@ -251,9 +186,8 @@ impl AnthropicProvider {
         };
 
         tracing::debug!(
-            "Anthropic response: has_text={}, tool_calls={}",
-            text.as_ref().is_some_and(|t| !t.is_empty()),
-            tool_calls.len()
+            "Anthropic response: has_text={}",
+            text.as_ref().is_some_and(|t| !t.is_empty())
         );
         if let Some(ref u) = usage {
             tracing::info!(
@@ -265,7 +199,6 @@ impl AnthropicProvider {
 
         ProviderResponse {
             text,
-            tool_calls,
             usage,
             reasoning_content: None,
             thinking_blocks,
@@ -278,10 +211,9 @@ impl Provider for AnthropicProvider {
     async fn chat(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse> {
-        let mut body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, opts);
         let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
         apply_sampling_mode(&mut body, opts, sampling_mode);
         let url = format!("{}/messages", self.http.base_url);
@@ -328,10 +260,9 @@ impl Provider for AnthropicProvider {
     async fn chat_stream(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
-        let mut body = self.build_request(messages, tools, opts);
+        let mut body = self.build_request(messages, opts);
         let mut sampling_mode = initial_sampling_mode(&opts.model, opts);
         apply_sampling_mode(&mut body, opts, sampling_mode);
         body["stream"] = json!(true);
@@ -386,7 +317,6 @@ impl Provider for AnthropicProvider {
 
 #[derive(Default)]
 struct AnthropicStreamState {
-    current_tool_id: String,
     accumulated_input_tokens: u64,
     pending_thinking: HashMap<usize, PendingThinkingBlock>,
 }
@@ -457,23 +387,6 @@ fn parse_sse_event(block: &str, state: &mut AnthropicStreamState) -> Vec<Result<
                 return Vec::new();
             };
             match block_type {
-                "tool_use" => {
-                    let Some(id) = cb.get("id").and_then(Value::as_str) else {
-                        return Vec::new();
-                    };
-                    let Some(name) = cb.get("name").and_then(Value::as_str) else {
-                        return Vec::new();
-                    };
-                    let id = id.to_string();
-                    let name = name.to_string();
-                    state.current_tool_id.clone_from(&id);
-                    tracing::info!("Anthropic tool call start: {name}");
-                    vec![Ok(StreamEvent::ToolCallStart {
-                        id,
-                        name,
-                        extra_content: None,
-                    })]
-                }
                 "thinking" => {
                     let pending = state.pending_thinking.entry(index).or_default();
                     pending.kind = Some(PendingThinkingKind::Thinking);
@@ -516,15 +429,6 @@ fn parse_sse_event(block: &str, state: &mut AnthropicStreamState) -> Vec<Result<
                         return Vec::new();
                     };
                     vec![Ok(StreamEvent::TextDelta(text.to_string()))]
-                }
-                "input_json_delta" => {
-                    let Some(chunk) = delta.get("partial_json").and_then(Value::as_str) else {
-                        return Vec::new();
-                    };
-                    vec![Ok(StreamEvent::ToolCallDelta {
-                        id: state.current_tool_id.clone(),
-                        args_chunk: chunk.to_string(),
-                    })]
                 }
                 "thinking_delta" => {
                     if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
@@ -603,9 +507,11 @@ fn parse_sse_event(block: &str, state: &mut AnthropicStreamState) -> Vec<Result<
                 output_tokens,
             };
             tracing::info!(
-                "Anthropic stream done: in={}, out={}",
-                usage.input_tokens,
-                usage.output_tokens
+                event = "provider.chat.stream.done",
+                provider = "anthropic",
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                "Anthropic stream done"
             );
             vec![Ok(StreamEvent::Done(usage))]
         }

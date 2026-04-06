@@ -1,18 +1,14 @@
-# zerda minimal configuration
-# 由 zerda.toml.full 裁剪：保留常用必配项，移除非必要调参项。
-# 其他配置使用代码默认值（见 zerda.toml.full）。
+# zerda minimal configuration for the bundled Compose deployment
 
-# =============================
-# Providers
-# =============================
 [providers.openai]
 type = "openai_chat"
 api_key = "${OPENAI_API_KEY}"
-base_url = ""
+base_url = "${OPENAI_BASE_URL}"
 
-# =============================
-# Agent
-# =============================
+[agent]
+tool_timeout = 300
+disabled_primitives = []
+
 [agent.primary_model]
 model = "openai@${OPENAI_MODEL}"
 vision = true
@@ -21,58 +17,40 @@ vision = true
 model = "openai@${OPENAI_FAST_MODEL}"
 vision = true
 
-# =============================
-# Reflection
-# =============================
-[reflection]
-enabled = false
-llm_model = "openai@${OPENAI_REFLECTION_MODEL}"
-max_tokens = 2048
-embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
-embedding_dim = 1536
-qdrant_url = "http://qdrant:6333"
-qdrant_api_key = ""
+# [[channels]]
+# name = "telegram"
+# token = "${TELEGRAM_BOT_TOKEN}"
+# allowed_users = []
+# max_message_length = 4096
+# draft_stream_update_interval_ms = 350
 
-# =============================
-# Docs Search
-# =============================
-[docs_search]
-enabled = true
-embedding_model = "openai@${OPENAI_EMBEDDING_MODEL}"
-embedding_dim = 1536
-qdrant_url = "http://qdrant:6333"
-qdrant_api_key = ""
-collection = "zerda_docs_index"
-docs_dir = "docs/zerda"
-
-# =============================
-# Channels
-# =============================
-[[channels]]
-name = "telegram"
-token = "${TELEGRAM_BOT_TOKEN}"
-allowed_users = []
-max_message_length = 4096
-draft_stream_update_interval_ms = 350
-
-# =============================
-# TTS / STT
-# =============================
-[tts]
-provider = "minimax"
-api_key = "${MINIMAX_API_KEY}"
-model = "speech-2.8-hd"
-voice_id = "female-shaonv"
+# [[channels]]
+# name = "wechat"
+# gateway_url = "http://wechat-agent-gateway:8080"
 
 [stt]
-provider = "groq"
-api_key = "${GROQ_API_KEY}"
+provider = ""
 model = "whisper-large-v3-turbo"
 
-# =============================
-# Memory Service
-# =============================
-[memory_service]
-enabled = false
-url = "http://memory-service:8080"
-auth_token = "${MEMBURROW_AUTH_TOKEN}"
+[memory]
+enabled = true
+
+[memory.embedding]
+base_url = "${OPENAI_BASE_URL}"
+api_key = "${OPENAI_API_KEY}"
+model = "text-embedding-3-small"
+dimensions = 1536
+timeout_ms = 5000
+
+[memory.sqlite]
+path = "~/.zerda/memory/ema.sqlite3"
+
+[memory.chroma]
+url = "http://chroma:8000"
+
+[log]
+level = "info"
+format = "json"
+debug_plaintext = false
+stream_progress_interval_ms = 2000
+include_target = true

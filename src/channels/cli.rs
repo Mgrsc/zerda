@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
-use super::{Channel, ChannelMessage};
+use super::{Channel, ChannelMessage, ChannelMessageOrigin};
 
 pub struct CliChannel;
 
@@ -102,6 +102,8 @@ impl Channel for CliChannel {
                     content: trimmed,
                     content_parts: None,
                     channel: "cli".to_string(),
+                    origin: ChannelMessageOrigin::Human,
+                    related_job_id: None,
                 })
                 .await
             {

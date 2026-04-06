@@ -12,14 +12,29 @@ except ModuleNotFoundError:
     tomllib = None
 
 
-def _resolve_primitives_root() -> Path:
+def _resolve_primitives_roots() -> list[Path]:
+    raw_many = os.environ.get("PTC_PRIMITIVES_PY_ROOTS", "").strip()
+    if raw_many:
+        try:
+            parsed = json.loads(raw_many)
+            if isinstance(parsed, list):
+                roots = [
+                    Path(str(item)).expanduser().resolve()
+                    for item in parsed
+                    if str(item).strip()
+                ]
+                if roots:
+                    return roots
+        except json.JSONDecodeError:
+            pass
+
     raw = (
-        os.environ.get("EXECUTOR_PRIMITIVES_PY_ROOT", "").strip()
+        os.environ.get("PTC_PRIMITIVES_PY_ROOT", "").strip()
         or os.environ.get("ZERDA_PRIMITIVES_ROOT", "").strip()
     )
     if raw:
-        return Path(raw).expanduser().resolve()
-    return Path(__file__).resolve().parent
+        return [Path(raw).expanduser().resolve()]
+    return [Path(__file__).resolve().parent]
 
 
 def _parse_disabled(raw: str) -> set[str]:
@@ -56,16 +71,21 @@ def _disabled_from_config() -> set[str]:
 
 
 def _inject() -> None:
-    root = _resolve_primitives_root()
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
+    for root in _resolve_primitives_roots():
+        root_str = str(root)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
     disabled = _disabled_from_config()
-    disabled.update(_parse_disabled(os.environ.get("EXECUTOR_DISABLED_PRIMITIVES", "")))
+    disabled.update(_parse_disabled(os.environ.get("PTC_DISABLED_PRIMITIVES", "")))
     try:
         from primitives.catalog import get_primitive_registry
+        from custom_primitives.catalog import (
+            get_primitive_registry as get_custom_primitive_registry,
+        )
 
-        registry = get_primitive_registry(disabled_primitives=disabled)
+        registry = {}
+        registry.update(get_primitive_registry(disabled_primitives=disabled))
+        registry.update(get_custom_primitive_registry(disabled_primitives=disabled))
     except Exception:
         return
     for name, primitive in registry.items():

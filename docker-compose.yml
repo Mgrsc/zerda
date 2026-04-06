@@ -4,6 +4,7 @@ services:
     pull_policy: always
     init: true
     hostname: e-desert
+    working_dir: /root/.zerda
     restart: unless-stopped
     env_file: .env
     environment:
@@ -12,49 +13,24 @@ services:
       - zerda-data:/root/.zerda
       - ./zerda.toml:/root/.zerda/zerda.toml
       - ./identity.md:/root/.zerda/identity.md
-      # - ./mcp.toml:/root/.zerda/mcp.toml
+      - ./custom_primitives:/root/.zerda/custom_primitives
     depends_on:
-      - memory-service
-      - qdrant
+      - chroma
+      - wechat-agent-gateway
 
-  postgres:
-    image: postgres:18.3-alpine3.23
+  chroma:
+    image: chromadb/chroma:latest
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: memburrow
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d memburrow"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      - chroma-data:/chroma/chroma
 
-  qdrant:
-    image: docker.io/qdrant/qdrant
+  wechat-agent-gateway:
+    image: ghcr.io/mgrsc/wechat-agent-gateway:latest
     restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
     volumes:
-      - qdrant-data:/qdrant/storage
-
-  memory-service:
-    image: ghcr.io/mgrsc/memburrow:latest
-    restart: unless-stopped
-    stop_signal: SIGTERM
-    stop_grace_period: 5s
-    env_file:
-      - .env.distributed.example
-    ports:
-      - "8080:8080"
-    depends_on:
-      - postgres
-      - qdrant
+      - wechat-agent-gateway-data:/data
 
 volumes:
   zerda-data:
-  postgres-data:
-  qdrant-data:
+  chroma-data:
+  wechat-agent-gateway-data:

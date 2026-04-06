@@ -1,8 +1,9 @@
 use std::sync::LazyLock;
 
 use crate::config;
+use crate::ptc::primitive_index::PrimitiveIndex;
 
-const SYSTEM_RULES: &str = include_str!("prompts/system_rules.md");
+const SYSTEM_RULES: &str = include_str!("prompts/system_ptc_rules.md");
 
 struct EnvInfo {
     os: String,
@@ -17,10 +18,13 @@ static ENV_INFO: LazyLock<EnvInfo> = LazyLock::new(|| EnvInfo {
 });
 
 pub fn build_system_prompt_parts(
+    disabled_primitives: &[String],
     identity: Option<&str>,
     channel_supplement: Option<&str>,
 ) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
+
+    parts.push(build_available_primitives_block(disabled_primitives));
 
     if let Some(id) = identity {
         parts.push(id.to_string());
@@ -49,6 +53,30 @@ pub fn build_system_prompt_parts(
         );
     }
     parts
+}
+
+fn build_available_primitives_block(disabled_primitives: &[String]) -> String {
+    let mut block = String::from("<PTC_AVALIABLE_PRIMITIVES>\n");
+    let mut names = vec!["help".to_string()];
+    match PrimitiveIndex::load(disabled_primitives) {
+        Ok(index) => {
+            names.extend(index.available_prompt_names());
+            names.sort();
+            names.dedup();
+            if names.len() == 1 {
+                tracing::warn!("No enabled primitives found while building prompt");
+            } else {
+                block.push_str(&names.join("\n"));
+                block.push('\n');
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Failed to load primitive index while building prompt: {err}");
+            block.push_str("help\n");
+        }
+    }
+    block.push_str("</PTC_AVALIABLE_PRIMITIVES>");
+    block
 }
 
 fn build_env_block() -> String {

@@ -1,57 +1,40 @@
-# Planner-Executor Architecture
+# PTC Runtime Architecture
 
 ## Overview
 
-Zerda uses a Planner-Executor architecture that separates reasoning from mechanical execution.
+Zerda uses a single-assistant runtime with asynchronous PTC jobs.
 
-## Planner
+- The model handles dialogue directly.
+- Python-based mechanical work is expressed as `<PTC_TOOL_CALLING>` blocks.
+- Primitive discovery is expressed as Rust-handled `RUST_CALL` blocks.
+- The host intercepts those blocks, launches detached Python jobs, and injects completion results back into the same session.
+- There is no provider-level tool calling layer, no MCP integration, and no Skills subsystem.
 
-The Planner is the main reasoning agent. It:
+## Turn Flow
 
-- Understands user intent and decomposes goals into tasks
-- Collects information (searches, reads, queries)
-- Delegates concrete operations to the Executor via the `delegate_to_executor` tool
-- Synthesizes results from executor runs into coherent responses
-- Never executes mechanical work directly
+1. `src/main.rs` loads config, identity, providers, and optional STT.
+2. `src/runner.rs` builds the user turn and appends runtime job state or conversation summary when needed.
+3. `src/agent.rs` sends history to the active provider.
+4. `src/ptc/stream_interceptor.rs` splits visible assistant text from hidden PTC XML.
+5. `src/ptc/parser.rs` parses exact `<PTC_TOOL_CALLING>` and Rust-native `RUST_CALL` blocks.
+6. `src/ptc/primitive_index.rs` scans internal, external, and custom primitives for metadata.
+7. `src/ptc/job_manager.rs` either launches Python jobs or serves Rust-native primitive discovery results.
+8. Completed job results are injected back as runtime-originated `user` messages.
 
-## Executor
+## Why PTC
 
-The Executor handles mechanical task execution:
+- Keeps provider requests simple: only `system`, `user`, and `assistant` messages.
+- Avoids provider-specific function calling or tool schema drift.
+- Moves execution complexity into bounded Python jobs with artifacts and replayability.
+- Keeps the main conversation loop responsive while long-running work continues in the background.
 
-- Receives goal-oriented briefs from the Planner
-- Writes and runs Python scripts to accomplish tasks
-- Stores artifacts in `~/.zerda/executor_jobs/<YYYYMMDD>/<HHMMSS>_<task_slug>/`
-- Returns standardized results with status, data, error info
+## Artifacts
 
-### Executor Artifacts
+PTC jobs write artifacts under `~/.zerda/ptc_jobs/<YYYYMMDD>/<job>/`:
 
-Each executor job produces:
-- `script.py` - Generated Python code
-- `log.txt` - Combined stdout/stderr
-- `out.json` - Key results in structured format
-- `telemetry.jsonl` - Execution metrics
-- `meta.json` - Job metadata
-
-### Executor Return Contract
-
-```json
-{
-  "status": "ok|partial|error|timeout",
-  "data": { ... },
-  "error_code": "string",
-  "error_message": "string",
-  "retryable": true
-}
-```
-
-## Delegation Instruction Format
-
-When the Planner delegates to the Executor, it provides:
-- **instruction**: Structured instruction in the form `ACTION(param=value, ...) -> {return_fields}`
-
-## Benefits
-
-- **KV-Cache Friendly**: Static system prompt with append-only history maximizes prefix cache hits
-- **Context Rot Resistance**: Mechanical errors isolated to executor artifacts, not polluting planner context
-- **Token Efficiency**: ~80% lower token usage vs traditional ReAct in observed samples
-- **Concurrency**: Planner can fan-out multiple independent executor jobs
+- `script.py`
+- `out.json`
+- `log.txt`
+- `telemetry.jsonl`
+- `status.json`
+- `meta.json`

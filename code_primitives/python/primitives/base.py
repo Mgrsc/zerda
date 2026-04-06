@@ -33,7 +33,7 @@ class PrimitiveContext:
 
 
 def load_context() -> PrimitiveContext:
-    telemetry_raw = os.environ.get("EXECUTOR_TELEMETRY_PATH", "").strip()
+    telemetry_raw = os.environ.get("PTC_TELEMETRY_PATH", "").strip()
     telemetry_path = Path(telemetry_raw) if telemetry_raw else Path("telemetry.jsonl")
     key = (
         os.environ.get("FIRECRAWL_API_KEY", "").strip()

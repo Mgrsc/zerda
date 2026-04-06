@@ -6,10 +6,12 @@
 *.swp
 *.swo
 .DS_Store
-mcp.toml
 .firecrawl/
 example-docs/
 docker-compose.test.yml
 zerda.test.toml
-mcp.toml.test
 .env.test
+dev-file/
+__pycache__/
+*.py[cod]
+telemetry.jsonl

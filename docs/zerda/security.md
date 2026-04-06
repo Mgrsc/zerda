@@ -15,7 +15,6 @@ Zerda has **full system permissions**. The agent can:
 
 - API keys should be stored in environment variables, not directly in config files
 - Use `${VAR}` syntax in config to reference environment variables
-- MCP subprocesses receive only explicitly defined `env` vars (no auto-inheritance)
 - Secrets are not logged in regular trace output
 
 ## Access Control
@@ -27,7 +26,7 @@ Zerda has **full system permissions**. The agent can:
 
 ## Docker Deployment
 
-Zerda can be run in Docker with `zerda serve` for the Telegram bot:
+Zerda can be run in Docker with `zerda serve` for configured channels such as Telegram:
 
 ```dockerfile
 FROM rust:latest AS builder

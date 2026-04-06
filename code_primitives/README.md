@@ -1,6 +1,6 @@
 # Code Primitives Specification
 
-This directory stores Python primitives that can be injected and called directly by the Executor.
+This directory stores core Python primitives that can be injected and called directly by PTC job scripts.
 
 The goal is to make the model reuse stable primitives during execution, reducing temporary script stitching, parameter hallucination, and context noise.
 
@@ -8,7 +8,7 @@ The goal is to make the model reuse stable primitives during execution, reducing
 
 - Primitive implementations should prefer the Python standard library by default.
 - Introduce third-party dependencies only when the standard library cannot satisfy the requirement.
-- If a third-party dependency is required, it must be preinstalled in the container image and explicitly documented in this README. The Executor must not install dependencies on the fly during a task.
+- If a third-party dependency is required, it must be preinstalled in the container image and explicitly documented in this README. PTC job code must not install dependencies on the fly during a task.
 - Missing dependencies must return `DEPENDENCY_MISSING` instead of crashing the primitive.
 
 ## Directory Structure
@@ -22,9 +22,11 @@ The goal is to make the model reuse stable primitives during execution, reducing
 - `python/primitives/base.py`
   - Shared capabilities: hard timeout, retry, input validation, telemetry persistence, Firecrawl HTTP wrapper
 - `python/primitives/catalog.py`
-  - Primitive registry
+  - Core primitive registry
 - `python/primitives/*.py`
-  - Concrete primitive implementation files
+  - Core primitive implementation files
+- `../custom_primitives/*.py`
+  - Non-core primitive implementation files, including bundled integrations and user-added primitives
 
 ## Hard Constraints for Primitive Design
 
@@ -40,7 +42,7 @@ Every primitive must return the `PrimitiveResult.to_public_dict()` structure:
 
 Status codes must use `ActionStatus`. Do not return arbitrary status strings.
 
-All primitives injected into Executor must be declared as `async def`. Callers must use `await` and must not treat them as synchronous functions.
+All injected primitives must be declared as `async def`. Callers must use `await` and must not treat them as synchronous functions.
 
 ### 2. Mandatory Hard Timeout
 
@@ -110,19 +112,18 @@ Each public primitive must contain these sections:
 
 Important: `[When NOT to use]` must clearly explain misuse cases to reduce wrong primitive selection by the model.
 
-`[Output Contract]` must explicitly define the success condition and key field paths so Executor can read them strictly by contract instead of guessing key names.
+`[Output Contract]` must explicitly define the success condition and key field paths so PTC job code can read them strictly by contract instead of guessing key names.
 
 ## Naming Convention
 
 - Primitive function names must be precise and semantically complete. Avoid abbreviations and vague names.
 - Use verb + object naming, for example:
-  - `firecrawl_scrape_page`
   - `firecrawl_search_web`
 - Do not use natural-language names such as "web page crawling" as function identifiers.
 
 ## Environment Variable Gating
 
-Firecrawl primitives are available only when configuration is present:
+The Firecrawl search primitive is available only when configuration is present:
 
 - `FIRECRAWL_API_KEY` (primary)
 - `FIRECRAWL_KEY` (compatibility fallback)
@@ -134,19 +135,36 @@ Primitive enablement uses a blacklist. All primitives are enabled by default; di
 
 ## Steps to Add a New Primitive
 
-1. Create a new file under `python/primitives/` and implement an async function.
-2. Add validation, hard timeout, retry, docstring, and structured return according to this spec.
-3. Register the function in `python/primitives/catalog.py`.
-4. Ensure function signature and docstring can be parsed by the scanner (they are injected into the Executor catalog).
+1. Choose the correct source:
+   - core: `python/primitives/`
+   - non-core custom: `../custom_primitives/`
+2. Implement an async function with validation, hard timeout, retry, docstring, and structured return according to this spec.
+3. Register the function in the matching `catalog.py`.
+4. Ensure function signature and docstring can be parsed by the scanner (they are injected into the runtime primitive catalog).
 
-## Built-in Primitives
+## Core Built-in Primitives
+
+- `fs_read`
+- `fs_write`
+- `fs_replace`
+- `fs_list`
+- `fs_move`
+- `fs_delete`
+- `process_run`
+- `process_spawn`
+- `process_poll`
+- `process_terminate`
+- `shell`
+
+## Custom Primitives
 
 - `extract_main_text_from_html`
   - Standard-library primitive that extracts readable main text and title from HTML
-- `firecrawl_scrape_page`
-  - Requires `FIRECRAWL_API_KEY`
 - `firecrawl_search_web`
   - Requires `FIRECRAWL_API_KEY`
+- `scrapling_fetch_page`
+  - Requires `scrapling[fetchers]` in the Python runtime
+  - Default page-fetch primitive with built-in routing for WeChat articles, X/Twitter, and selected dynamic-site stealth fallback
 
 ## Primitive Template
 

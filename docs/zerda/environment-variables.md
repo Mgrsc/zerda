@@ -3,61 +3,50 @@
 ## Core
 
 | Variable | Description |
-|----------|-------------|
-| `ZERDA_CONFIG` | Path to zerda.toml config file |
+|---|---|
+| `ZERDA_CONFIG` | Path to the active config file |
 | `ZERDA_PRIMITIVES_ROOT` | Override code primitives root directory |
 
-## LLM Providers
+## Providers
 
 | Variable | Description |
-|----------|-------------|
+|---|---|
 | `OPENAI_API_KEY` | OpenAI API key |
-| `OPENAI_BASE_URL` | OpenAI-compatible API base URL (used when referenced by provider `base_url`) |
-| `OPENAI_MODEL` | Default OpenAI model name |
-| `OPENAI_FAST_MODEL` | Fast model name for compression/subagent |
+| `OPENAI_BASE_URL` | OpenAI-compatible base URL override for chat and the default EMA embedding endpoint |
+| `OPENAI_MODEL` | Example primary model name |
+| `OPENAI_FAST_MODEL` | Example fast model name |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 
 ## Channels
 
 | Variable | Description |
-|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 
-## TTS / STT
-
-| Variable | Description |
-|----------|-------------|
-| `MINIMAX_API_KEY` | MiniMax API key for TTS |
-| `GROQ_API_KEY` | Groq API key for STT (Whisper) |
-
-## Web & Search
+## Speech
 
 | Variable | Description |
-|----------|-------------|
-| `FIRECRAWL_API_KEY` | Firecrawl API key for web scraping |
-| `FIRECRAWL_BASE_URL` | Firecrawl API base URL (default: https://api.firecrawl.dev) |
+|---|---|
+| `GROQ_API_KEY` | Groq API key for STT |
 
-## Document Search (Qdrant)
-
-Document search is configured in `zerda.toml` under `[docs_search]`.
-
-- `qdrant_url`, `qdrant_api_key`, `collection`, `docs_dir`, `embedding_model`, and `embedding_dim` are TOML fields.
-- Embedding provider credentials come from `[providers.<id>]` referenced by `docs_search.embedding_model`.
-
-## MemBurrow Memory Service
+## Web
 
 | Variable | Description |
-|----------|-------------|
-| `MEMBURROW_AUTH_TOKEN` | Bearer token for MemBurrow API |
+|---|---|
+| `FIRECRAWL_API_KEY` | Firecrawl API key for the search primitive |
+| `FIRECRAWL_BASE_URL` | Firecrawl API base URL override |
 
-## Executor-Injected Variables
+Runtime note: `scrapling_fetch_page` does not use an environment variable, but it does require the Python runtime to have `scrapling[fetchers]` installed. It may also require Playwright browser binaries when its internal stealth path is used for selected dynamic domains. Otherwise the primitive returns `dependency_missing`.
 
-These are automatically set in executor Python scripts:
+Memory note: the maintained configs reuse `OPENAI_API_KEY` for the default EMA embedding endpoint. If you want EMA embeddings to use a different credential, edit `memory.embedding.api_key` in TOML directly.
+
+## PTC-Injected Variables
 
 | Variable | Description |
-|----------|-------------|
-| `EXECUTOR_OUT_PATH` | Path for structured output JSON |
-| `EXECUTOR_LOG_PATH` | Path for log file |
-| `EXECUTOR_TELEMETRY_PATH` | Path for telemetry JSONL |
-| `EXECUTOR_PRIMITIVES_PY_ROOT` | Code primitives root path |
-| `EXECUTOR_DISABLED_PRIMITIVES` | JSON array or comma-separated primitive blacklist |
+|---|---|
+| `PTC_OUT_PATH` | Structured output JSON path |
+| `PTC_LOG_PATH` | Log file path |
+| `PTC_TELEMETRY_PATH` | Telemetry JSONL path |
+| `PTC_PRIMITIVES_PY_ROOT` | Code primitives root path |
+| `PTC_PRIMITIVES_PY_ROOTS` | JSON array of merged primitive package roots |
+| `PTC_DISABLED_PRIMITIVES` | Disabled primitive list |

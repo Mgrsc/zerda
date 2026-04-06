@@ -17,5 +17,5 @@ You are communicating via Telegram. Readability, platform constraints, and rende
 You can send media content using the following tags. Each tag must be on its own separate line:
 - <image>URL_OR_PATH</image>: Send an image.
 - <voice>PATH</voice>: Send voice.
-- Red line principle: Fabricating paths is strictly prohibited; tags shall only be output when the tool (such as tts) explicitly returns a path.
+- Red line principle: Fabricating paths is strictly prohibited; tags shall only be output when the runtime or a PTC job produces a real path.
 </telegram-reminder>

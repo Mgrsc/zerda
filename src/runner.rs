@@ -1,52 +1,64 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::agent;
-use crate::channels::{self, Channel};
+use crate::channels::{self, Channel, ChannelMessageOrigin};
 use crate::commands;
 use crate::config::{self, Config, ModelRef};
-use crate::identity;
-use crate::memory::{IngestBuffer, MemoryServiceClient};
+use crate::logging::stream_progress_interval_ms;
+use crate::memory;
 use crate::prompt::build_system_prompt_parts;
-use crate::providers::{self, ChatOptions, ContentPart, ProviderRegistry};
+use crate::providers::{
+    self, ChatOptions, ContentPart, MessageMetadata, MessageOrigin, ProviderRegistry,
+};
+use crate::ptc::job_manager::{JobManager, PtcSessionContext};
 use crate::rich_content;
-use crate::skills::{self, Skill};
 use crate::stt::SttProvider;
-use crate::tools;
-use crate::tools::reload::ReloadSignal;
 
 pub struct RunContext {
-    pub config_path: Option<PathBuf>,
-    pub reload_signal: ReloadSignal,
     pub stt_provider: Option<Arc<dyn SttProvider>>,
-    pub memory_client: Option<MemoryServiceClient>,
+    pub memory_service: Option<Arc<memory::MemoryService>>,
 }
 
 pub struct HotState {
-    pub tools: Vec<Box<dyn tools::Tool>>,
-    pub todo: tools::todo::TodoHandle,
     pub identity_text: Option<String>,
-    pub skills: Vec<skills::Skill>,
-    pub shared_skills: Arc<RwLock<Vec<skills::Skill>>>,
-    pub skill_cache: Arc<RwLock<HashMap<String, String>>>,
     pub cfg: Config,
-    pub builtin_count: usize,
     pub chat_opts: ChatOptions,
     pub compression_provider: (Arc<dyn providers::Provider>, ChatOptions),
     pub registry: ProviderRegistry,
     pub active_provider: Arc<dyn providers::Provider>,
     pub active_model_ref: ModelRef,
+    pub job_manager: Option<Arc<JobManager>>,
+}
+
+pub(crate) struct PrepareUserTurnInput {
+    pub content: String,
+    pub content_parts: Option<Vec<ContentPart>>,
+    pub channel_supplement: Option<String>,
+    pub session_key: Option<String>,
+    pub memory_block: Option<String>,
+    pub origin: MessageOrigin,
+    pub related_job_id: Option<String>,
+}
+
+struct PostTurnInput {
+    memory_service: Option<Arc<memory::MemoryService>>,
+    memory_analyzer: Option<(Arc<dyn providers::Provider>, ChatOptions)>,
+    turn_id: String,
+    session_id: String,
+    entity_id: String,
+    channel: Option<String>,
+    input_origin: MessageOrigin,
+    turn_input_content: Option<String>,
+    assistant_response: Option<String>,
 }
 
 pub(crate) fn refresh_prompt(
@@ -54,9 +66,20 @@ pub(crate) fn refresh_prompt(
     hot: &HotState,
     channel_supplement: Option<&str>,
 ) {
-    let system_prompt_parts =
-        build_system_prompt_parts(hot.identity_text.as_deref(), channel_supplement);
+    let system_prompt_parts = build_system_prompt_parts(
+        &hot.cfg.agent.disabled_primitives,
+        hot.identity_text.as_deref(),
+        channel_supplement,
+    );
     agent.set_system_prompt_parts(system_prompt_parts);
+}
+
+fn provider_message_origin(origin: ChannelMessageOrigin) -> MessageOrigin {
+    match origin {
+        ChannelMessageOrigin::Human => MessageOrigin::Human,
+        ChannelMessageOrigin::RuntimePtcResult => MessageOrigin::RuntimePtcResult,
+        ChannelMessageOrigin::RuntimePtcNotice => MessageOrigin::RuntimePtcNotice,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,25 +87,23 @@ fn build_user_message(
     content: String,
     content_parts: Option<Vec<ContentPart>>,
     vision_enabled: bool,
-    skills_list: &[Skill],
     conversation_summary: Option<&str>,
-    todo_reminder: Option<String>,
-    memory_recall: Option<&str>,
+    runtime_state: Option<&str>,
+    memory_block: Option<&str>,
+    origin: MessageOrigin,
+    related_job_id: Option<String>,
 ) -> providers::ConversationMessage {
     let mut parts: Vec<ContentPart> = Vec::new();
 
-    let skills_idx = skills::skills_index(skills_list);
-    if !skills_idx.is_empty() {
-        parts.push(ContentPart::Text(skills_idx));
+    if let Some(runtime_state) = runtime_state {
+        if !runtime_state.trim().is_empty() {
+            parts.push(ContentPart::Text(runtime_state.to_string()));
+        }
     }
 
-    if let Some(reminder) = todo_reminder {
-        parts.push(ContentPart::Text(reminder));
-    }
-
-    if let Some(recall) = memory_recall {
-        if !recall.trim().is_empty() {
-            parts.push(ContentPart::Text(recall.to_string()));
+    if let Some(memory_block) = memory_block {
+        if !memory_block.trim().is_empty() {
+            parts.push(ContentPart::Text(memory_block.to_string()));
         }
     }
 
@@ -130,88 +151,124 @@ fn build_user_message(
         parts.push(ContentPart::Text(content));
     }
 
-    providers::ConversationMessage::user_parts(parts)
+    let mut message = providers::ConversationMessage::user_parts(parts);
+    message.metadata = MessageMetadata {
+        origin,
+        related_job_id,
+        related_turn_id: None,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    message
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_user_turn(
     agent: &mut agent::Agent,
     hot: &HotState,
-    content: String,
-    content_parts: Option<Vec<ContentPart>>,
-    channel_supplement: Option<&str>,
-    memory_client: Option<&MemoryServiceClient>,
-    entity_id: Option<&str>,
-) -> Vec<String> {
+    input: PrepareUserTurnInput,
+) {
     let summary = agent.take_conversation_summary();
-    let todo_reminder = hot.todo.pending_reminder();
 
-    let mut recall_item_ids = Vec::new();
-    let memory_recall = if let Some(client) = memory_client {
-        match client.recall(&content, entity_id).await {
-            Ok(items) => {
-                let filtered_items = client.filter_recall_items(items);
-                recall_item_ids = filtered_items.iter().filter_map(|i| i.id.clone()).collect();
-                MemoryServiceClient::format_recall_context(&filtered_items)
-            }
-            Err(e) => {
-                tracing::warn!("Memory recall failed, skipping: {e}");
-                None
-            }
-        }
+    let runtime_state = if let (Some(manager), Some(session_key)) =
+        (&hot.job_manager, input.session_key.as_deref())
+    {
+        let jobs = manager.running_jobs_for_session(session_key).await;
+        manager.render_runtime_state_block(&jobs)
     } else {
         None
     };
 
     let user_msg = build_user_message(
-        content,
-        content_parts,
+        input.content,
+        input.content_parts,
         hot.cfg.agent.primary_model.vision,
-        &hot.skills,
         summary.as_deref(),
-        todo_reminder,
-        memory_recall.as_deref(),
+        runtime_state.as_deref(),
+        input.memory_block.as_deref(),
+        input.origin,
+        input.related_job_id,
     );
     agent.history.push(user_msg);
-    refresh_prompt(agent, hot, channel_supplement);
-    recall_item_ids
+    refresh_prompt(agent, hot, input.channel_supplement.as_deref());
 }
 
-enum BudgetStatus {
-    Ok,
-    Exhausted,
+pub(crate) fn current_main_model_request(agent: &agent::Agent) -> String {
+    agent
+        .history
+        .last()
+        .map(|message| message.text_content())
+        .unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn post_turn(
-    agent: &mut agent::Agent,
+enum BusyTurnAction {
+    Continue,
+    CancelOnly,
+    CancelAndRun(commands::Command),
+}
+
+struct BusyCommandDispatch {
+    feedback: Vec<String>,
+    action: BusyTurnAction,
+}
+
+async fn dispatch_busy_command(
+    command: commands::Command,
+    agent: &agent::Agent,
     hot: &HotState,
-    memory_client: Option<&MemoryServiceClient>,
-    ingest_buffer: Option<&mut IngestBuffer>,
-    entity_id: Option<&str>,
-    session_id: Option<&str>,
-    turn_id: Option<&str>,
-    channel: Option<&str>,
-    raw_user_content: Option<&str>,
-    assistant_response: Option<&str>,
-    recall_item_ids: &[String],
-) -> BudgetStatus {
-    if hot.cfg.agent.show_usage {
-        let msg = format!(
-            "tokens: in={}, out={}, total={}",
-            agent.total_usage.input_tokens,
-            agent.total_usage.output_tokens,
-            agent.total_usage.input_tokens + agent.total_usage.output_tokens,
-        );
-        tracing::info!("{msg}");
-    }
-
-    if let Some(budget) = hot.cfg.agent.max_budget_tokens {
-        let total = agent.total_usage.input_tokens + agent.total_usage.output_tokens;
-        if total >= budget {
-            return BudgetStatus::Exhausted;
+    session_key: Option<&str>,
+    queued_commands: &mut VecDeque<commands::Command>,
+) -> BusyCommandDispatch {
+    match command.policy() {
+        commands::CommandPolicy::ImmediateRead | commands::CommandPolicy::ImmediateJobControl => {
+            BusyCommandDispatch {
+                feedback: vec![
+                    commands::execute_immediate_command(&command, agent, hot, session_key).await,
+                ],
+                action: BusyTurnAction::Continue,
+            }
         }
+        commands::CommandPolicy::QueueWhileBusy => {
+            queued_commands.push_back(command.clone());
+            BusyCommandDispatch {
+                feedback: vec![
+                    commands::execute_immediate_command(&command, agent, hot, session_key).await,
+                ],
+                action: BusyTurnAction::Continue,
+            }
+        }
+        commands::CommandPolicy::CancelThenRun => BusyCommandDispatch {
+            feedback: Vec::new(),
+            action: BusyTurnAction::CancelAndRun(command),
+        },
+        commands::CommandPolicy::CancelCurrentTurn => BusyCommandDispatch {
+            feedback: Vec::new(),
+            action: BusyTurnAction::CancelOnly,
+        },
     }
+}
+
+async fn drain_queued_commands(
+    queued_commands: &mut VecDeque<commands::Command>,
+    agent: &mut agent::Agent,
+    hot: &mut HotState,
+    ctx: &RunContext,
+    session_key: Option<&str>,
+) -> Vec<String> {
+    let mut feedback = Vec::new();
+    while let Some(command) = queued_commands.pop_front() {
+        feedback
+            .push(commands::execute_stateful_command(&command, agent, hot, ctx, session_key).await);
+    }
+    feedback
+}
+
+async fn post_turn(agent: &mut agent::Agent, input: PostTurnInput) {
+    let msg = format!(
+        "tokens: in={}, out={}, total={}",
+        agent.total_usage.input_tokens,
+        agent.total_usage.output_tokens,
+        agent.total_usage.input_tokens + agent.total_usage.output_tokens,
+    );
+    tracing::info!("{msg}");
 
     if let Err(e) = agent
         .auto_compact(&config::resolve_path(config::MEMORY_DIR))
@@ -220,228 +277,68 @@ async fn post_turn(
         tracing::warn!("Auto-compact failed: {e}");
     }
 
-    if let (Some(client), Some(buffer)) = (memory_client, ingest_buffer) {
-        let tid = turn_id.unwrap_or("");
-        buffer.push(raw_user_content, assistant_response, tid);
-        if buffer.should_flush() {
-            flush_ingest_buffer(buffer, client, entity_id, session_id, channel).await;
-        }
-        if !recall_item_ids.is_empty() {
-            if let Err(e) = client.feedback(recall_item_ids, entity_id, turn_id).await {
-                tracing::warn!("Memory feedback failed: {e}");
+    if let Some(memory_service) = input
+        .memory_service
+        .as_ref()
+        .filter(|_| input.turn_input_content.is_some() || input.assistant_response.is_some())
+    {
+        let mut messages = Vec::new();
+        if let Some(text) = input.turn_input_content.as_deref() {
+            if !text.trim().is_empty() {
+                let role = match input.input_origin {
+                    MessageOrigin::Human => "user",
+                    MessageOrigin::RuntimePtcResult => "runtime_ptc_result",
+                    MessageOrigin::RuntimePtcNotice => "runtime_ptc_notice",
+                };
+                messages.push(memory::types::JournalMessage::new(role, text));
             }
         }
+        if let Some(text) = input.assistant_response.as_deref() {
+            if !text.trim().is_empty() {
+                messages.push(memory::types::JournalMessage::new("assistant", text));
+            }
+        }
+        if let Err(e) = memory_service.append_turn_messages(
+            &input.turn_id,
+            &input.session_id,
+            &input.entity_id,
+            input.channel.as_deref(),
+            &messages,
+        ) {
+            tracing::warn!("Failed to append memory journal: {e}");
+        }
+        if let Some(analyzer) = input.memory_analyzer {
+            memory_service.spawn_maintenance(analyzer, input.entity_id.clone());
+        }
     }
-
-    BudgetStatus::Ok
 }
 
-async fn flush_ingest_buffer(
-    buffer: &mut IngestBuffer,
-    client: &MemoryServiceClient,
+async fn recall_memory_block(
+    memory_service: Option<&Arc<memory::MemoryService>>,
     entity_id: Option<&str>,
-    session_id: Option<&str>,
-    channel: Option<&str>,
-) {
-    if !buffer.has_pending() {
-        return;
-    }
-    if let Some(turns) = buffer.take() {
-        for (messages, turn_id) in turns {
+    query: &str,
+) -> Option<String> {
+    let memory_service = memory_service?;
+    let entity_id = entity_id?;
+    match memory_service.recall_prompt(entity_id, query).await {
+        Ok(Some((block, result))) => {
             tracing::debug!(
-                message_count = messages.len(),
-                turn_id = %turn_id,
-                "Flushing ingest buffer"
+                entity_id = %entity_id,
+                facts = result.facts.len(),
+                insights = result.insights.len(),
+                failures = result.failures.len(),
+                procedures = result.procedures.len(),
+                template = %result.debug.template,
+                "Memory recall hit"
             );
-            if let Err(e) = client
-                .ingest(messages, entity_id, session_id, Some(&turn_id), channel)
-                .await
-            {
-                tracing::warn!("Memory ingest failed: {e}");
-            }
+            Some(block)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(entity_id = %entity_id, error = %error, "Memory recall failed");
+            None
         }
     }
-}
-
-fn retry_config_equal(a: &config::RetryConfig, b: &config::RetryConfig) -> bool {
-    a.max_retries == b.max_retries
-        && a.base_delay_ms == b.base_delay_ms
-        && a.max_delay_ms == b.max_delay_ms
-        && a.connect_timeout_secs == b.connect_timeout_secs
-        && a.request_timeout_secs == b.request_timeout_secs
-}
-
-fn provider_endpoints_equal(
-    a: &[config::ProviderEndpoint],
-    b: &[config::ProviderEndpoint],
-) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).all(|(x, y)| {
-        x.id == y.id
-            && x.kind == y.kind
-            && x.api_key == y.api_key
-            && x.base_url == y.base_url
-            && x.extra_headers == y.extra_headers
-            && retry_config_equal(&x.retry, &y.retry)
-    })
-}
-
-fn agent_model_fields_equal(a: &config::AgentConfig, b: &config::AgentConfig) -> bool {
-    a.primary_model == b.primary_model && a.fast_model == b.fast_model
-}
-
-fn channel_config_equal(a: &config::ChannelConfig, b: &config::ChannelConfig) -> bool {
-    a.name == b.name && a.params == b.params
-}
-
-fn channels_equal(a: &[config::ChannelConfig], b: &[config::ChannelConfig]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| channel_config_equal(x, y))
-}
-
-fn tts_config_equal(a: &config::TtsConfig, b: &config::TtsConfig) -> bool {
-    a.provider == b.provider
-        && a.api_key == b.api_key
-        && a.model == b.model
-        && a.voice_id == b.voice_id
-}
-
-fn stt_config_equal(a: &config::SttConfig, b: &config::SttConfig) -> bool {
-    a.provider == b.provider && a.api_key == b.api_key && a.model == b.model
-}
-
-fn log_config_equal(a: &config::LogConfig, b: &config::LogConfig) -> bool {
-    a.level == b.level
-}
-
-fn light_reload_blockers(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
-    let mut blockers = Vec::new();
-
-    if !provider_endpoints_equal(&old_cfg.providers, &new_cfg.providers) {
-        blockers.push("providers.*".to_string());
-    }
-    if !agent_model_fields_equal(&old_cfg.agent, &new_cfg.agent) {
-        blockers.push("agent.model/sampling".to_string());
-    }
-    if !channels_equal(&old_cfg.channels, &new_cfg.channels) {
-        blockers.push("channels".to_string());
-    }
-    if !tts_config_equal(&old_cfg.tts, &new_cfg.tts) {
-        blockers.push("tts.*".to_string());
-    }
-    if !stt_config_equal(&old_cfg.stt, &new_cfg.stt) {
-        blockers.push("stt.*".to_string());
-    }
-    if !log_config_equal(&old_cfg.log, &new_cfg.log) {
-        blockers.push("log.level".to_string());
-    }
-
-    if old_cfg.agent.max_iterations != new_cfg.agent.max_iterations {
-        blockers.push("agent.max_iterations".to_string());
-    }
-    if old_cfg.agent.max_history != new_cfg.agent.max_history {
-        blockers.push("agent.max_history".to_string());
-    }
-    if old_cfg.agent.max_tool_output_chars != new_cfg.agent.max_tool_output_chars {
-        blockers.push("agent.max_tool_output_chars".to_string());
-    }
-    if old_cfg.agent.show_usage != new_cfg.agent.show_usage {
-        blockers.push("agent.show_usage".to_string());
-    }
-    if old_cfg.agent.max_budget_tokens != new_cfg.agent.max_budget_tokens {
-        blockers.push("agent.max_budget_tokens".to_string());
-    }
-    if old_cfg.agent.session_cleanup_days != new_cfg.agent.session_cleanup_days {
-        blockers.push("agent.session_cleanup_days".to_string());
-    }
-    if old_cfg.agent.tool_timeout != new_cfg.agent.tool_timeout {
-        blockers.push("agent.tool_timeout".to_string());
-    }
-
-    blockers
-}
-
-async fn perform_light_reload(
-    agent: &mut agent::Agent,
-    ctx: &RunContext,
-    hot: &mut HotState,
-    channel_supplement: Option<&str>,
-) {
-    tracing::info!("Performing light reload...");
-
-    match config::load_config(ctx.config_path.as_deref()) {
-        Ok(new_cfg) => {
-            let blockers = light_reload_blockers(&hot.cfg, &new_cfg);
-            if !blockers.is_empty() {
-                let details = blockers.join(", ");
-                let msg = format!(
-                    "[System] Light reload rejected. These config changes require full reload: {details}"
-                );
-                agent.push_user_message(msg);
-                tracing::warn!("Light reload rejected due to full-reload-only changes: {details}");
-                return;
-            }
-
-            hot.tools.truncate(hot.builtin_count);
-
-            let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
-            hot.skills = skills::load_skills(&skills_dir);
-            *hot.shared_skills.write().await = hot.skills.clone();
-            hot.skill_cache.write().await.clear();
-            let skill_count = hot.skills.len();
-
-            let identity_path = config::resolve_path(&new_cfg.agent.identity_path);
-            hot.identity_text = if identity_path.exists() {
-                match identity::load_identity(&identity_path) {
-                    Ok(text) => Some(text),
-                    Err(e) => {
-                        tracing::warn!("Failed to reload identity: {e}");
-                        hot.identity_text.take()
-                    }
-                }
-            } else {
-                None
-            };
-
-            hot.cfg.mcp = new_cfg.mcp.clone();
-            hot.cfg.agent.identity_path = new_cfg.agent.identity_path.clone();
-
-            refresh_prompt(agent, hot, channel_supplement);
-
-            let msg = format!(
-                "[System] Light reload completed successfully. \
-                 Planner toolset refreshed, {skill_count} skill(s) loaded."
-            );
-            agent.push_user_message(msg);
-
-            tracing::info!("Light reload completed successfully");
-        }
-        Err(e) => {
-            let msg = format!("[System] Light reload failed: {e}");
-            agent.push_user_message(msg);
-            tracing::error!("Light reload failed (config error): {e}");
-        }
-    }
-}
-
-async fn check_reload(
-    agent: &mut agent::Agent,
-    ctx: &RunContext,
-    hot: &mut HotState,
-    channel_supplement: Option<&str>,
-) {
-    if ctx.reload_signal.take().is_some() {
-        perform_light_reload(agent, ctx, hot, channel_supplement).await;
-    }
-    refresh_skills(hot).await;
-}
-
-async fn refresh_skills(hot: &mut HotState) {
-    let skills_dir = config::resolve_path(config::MEMORY_DIR).join("skills");
-    hot.skills = skills::load_skills(&skills_dir);
-    *hot.shared_skills.write().await = hot.skills.clone();
-    hot.skill_cache.write().await.clear();
 }
 
 fn create_channel_registry(
@@ -460,7 +357,16 @@ pub async fn run_interactive(
     let (tx, mut rx) = mpsc::channel::<channels::ChannelMessage>(32);
     let cli_channel = channels::cli::CliChannel;
     let mut pending: Vec<channels::ChannelMessage> = Vec::new();
-    let mut ingest_buffer = IngestBuffer::new(hot.cfg.memory_service.ingest_batch_turns);
+    let mut queued_commands: VecDeque<commands::Command> = VecDeque::new();
+    hot.job_manager = Some(Arc::new(JobManager::new(
+        tx.clone(),
+        hot.cfg.agent.tool_timeout,
+        hot.cfg.agent.disabled_primitives.clone(),
+        (
+            Arc::clone(&hot.compression_provider.0),
+            hot.compression_provider.1.clone(),
+        ),
+    )));
 
     tokio::spawn(async move {
         if let Err(e) = cli_channel.listen(tx).await {
@@ -474,6 +380,12 @@ pub async fn run_interactive(
     }
 
     loop {
+        for feedback in
+            drain_queued_commands(&mut queued_commands, agent, hot, ctx, Some("cli:cli-user")).await
+        {
+            eprintln!("{feedback}");
+        }
+
         let msg = if let Some(idx) = pending.iter().position(|_| true) {
             pending.remove(idx)
         } else {
@@ -483,38 +395,61 @@ pub async fn run_interactive(
             }
         };
 
-        match commands::try_handle_command(&msg.content, agent, hot, ctx).await {
-            commands::CommandResult::Handled(feedback) => {
-                eprintln!("{feedback}");
-                print!("zerda> ");
-                if let Err(e) = std::io::stdout().flush() {
-                    tracing::debug!("Failed to flush prompt: {e}");
+        if matches!(msg.origin, ChannelMessageOrigin::Human) {
+            match commands::try_handle_command(&msg.content, agent, hot, ctx, Some("cli:cli-user"))
+                .await
+            {
+                commands::CommandResult::Handled(feedback) => {
+                    eprintln!("{feedback}");
+                    print!("zerda> ");
+                    if let Err(e) = std::io::stdout().flush() {
+                        tracing::debug!("Failed to flush prompt: {e}");
+                    }
+                    continue;
                 }
-                continue;
+                commands::CommandResult::NotACommand => {}
             }
-            commands::CommandResult::NotACommand => {}
         }
+        let turn_id = Uuid::new_v4().to_string();
         let snapshot = agent.snapshot_turn();
-        let interactive_turn_id = Uuid::new_v4().to_string();
-        let raw_content = msg.content.clone();
-        let recall_item_ids = prepare_user_turn(
+        let session_key = "cli:cli-user".to_string();
+        let related_job_id = msg.related_job_id;
+        let cli_entity_id = ctx
+            .memory_service
+            .as_ref()
+            .map(|service| service.entity_id());
+        let turn_input_content = Some(msg.content.clone());
+        let memory_block = if let Some(text) = turn_input_content
+            .as_deref()
+            .filter(|_| matches!(msg.origin, ChannelMessageOrigin::Human))
+        {
+            recall_memory_block(ctx.memory_service.as_ref(), cli_entity_id, text).await
+        } else {
+            None
+        };
+        prepare_user_turn(
             agent,
             hot,
-            msg.content,
-            msg.content_parts,
-            None,
-            ctx.memory_client.as_ref(),
-            None,
+            PrepareUserTurnInput {
+                content: msg.content,
+                content_parts: msg.content_parts,
+                channel_supplement: None,
+                session_key: Some(session_key.clone()),
+                memory_block,
+                origin: provider_message_origin(msg.origin),
+                related_job_id,
+            },
         )
         .await;
+        let main_model_request = current_main_model_request(agent);
 
         let mut cancelled = false;
-        let mut run_result = None;
+        let mut post_cancel_command = None;
+        let mut run_output = None;
         {
             let mut rx_closed = false;
-            let run_turn = agent.run_turn_stream(
+            let run_turn = agent.collect_turn_stream_output(
                 hot.active_provider.as_ref(),
-                &hot.tools,
                 &hot.chat_opts,
                 |delta| {
                     let safe = channels::cli::sanitize_terminal_text(delta);
@@ -523,24 +458,47 @@ pub async fn run_interactive(
                         tracing::debug!("Failed to flush stream output: {e}");
                     }
                 },
-                |_, _| {},
             );
             tokio::pin!(run_turn);
 
             loop {
                 tokio::select! {
                     result = &mut run_turn => {
-                        run_result = Some(result);
+                        run_output = Some(result);
                         break;
                     }
                     incoming = rx.recv(), if !rx_closed => {
                         match incoming {
                             Some(next) => {
-                                if commands::is_cancel_command(&next.content) {
-                                    cancelled = true;
-                                    tracing::info!("Interactive turn cancel requested by user");
-                                eprintln!("\nCurrent turn cancelled\n");
-                                    break;
+                                if matches!(next.origin, ChannelMessageOrigin::Human) {
+                                    if let Some(command) = commands::parse_command(&next.content) {
+                                        let dispatch = dispatch_busy_command(
+                                            command,
+                                            agent,
+                                            hot,
+                                            Some("cli:cli-user"),
+                                            &mut queued_commands,
+                                        )
+                                        .await;
+                                        for feedback in dispatch.feedback {
+                                            eprintln!("\n{feedback}\n");
+                                        }
+                                        match dispatch.action {
+                                            BusyTurnAction::Continue => {}
+                                            BusyTurnAction::CancelOnly => {
+                                                cancelled = true;
+                                                tracing::info!("Interactive turn cancel requested by user");
+                                                break;
+                                            }
+                                            BusyTurnAction::CancelAndRun(command) => {
+                                                cancelled = true;
+                                                post_cancel_command = Some(command);
+                                                tracing::info!("Interactive turn cancel requested by command");
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 }
                                 pending.push(next);
                             }
@@ -554,6 +512,24 @@ pub async fn run_interactive(
         if cancelled {
             agent.restore_turn(snapshot);
             tracing::info!("Interactive turn cancelled and rolled back");
+            eprintln!("\nCurrent turn cancelled\n");
+            if let Some(command) = post_cancel_command.take() {
+                let feedback = commands::execute_stateful_command(
+                    &command,
+                    agent,
+                    hot,
+                    ctx,
+                    Some("cli:cli-user"),
+                )
+                .await;
+                eprintln!("{feedback}");
+            }
+            for feedback in
+                drain_queued_commands(&mut queued_commands, agent, hot, ctx, Some("cli:cli-user"))
+                    .await
+            {
+                eprintln!("{feedback}");
+            }
             print!("zerda> ");
             if let Err(e) = std::io::stdout().flush() {
                 tracing::debug!("Failed to flush prompt: {e}");
@@ -561,11 +537,25 @@ pub async fn run_interactive(
             continue;
         }
 
-        let mut turn_response = None;
-        if let Some(result) = run_result {
+        let mut ptc_requests = Vec::new();
+        let mut ptc_parse_notice = None;
+        if let Some(result) = run_output {
             match result {
-                Ok(ref resp) => {
-                    turn_response = Some(resp.clone());
+                Ok(output) => {
+                    let resp = match agent.finish_streamed_turn(output) {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            eprintln!("\nError: {e}\n");
+                            agent.restore_turn(snapshot);
+                            print!("zerda> ");
+                            if let Err(e) = std::io::stdout().flush() {
+                                tracing::debug!("Failed to flush prompt: {e}");
+                            }
+                            continue;
+                        }
+                    };
+                    ptc_requests = resp.ptc_requests;
+                    ptc_parse_notice = resp.ptc_parse_notice;
                     println!("\n");
                 }
                 Err(e) => eprintln!("\nError: {e}\n"),
@@ -580,53 +570,70 @@ pub async fn run_interactive(
             continue;
         }
 
-        if hot.cfg.agent.show_usage {
-            eprintln!(
-                "[tokens: in={}, out={}, total={}]",
-                agent.total_usage.input_tokens,
-                agent.total_usage.output_tokens,
-                agent.total_usage.input_tokens + agent.total_usage.output_tokens,
-            );
-        }
-
-        check_reload(agent, ctx, hot, None).await;
-
-        if matches!(
-            post_turn(
-                agent,
-                hot,
-                ctx.memory_client.as_ref(),
-                Some(&mut ingest_buffer),
-                None,
-                None,
-                Some(&interactive_turn_id),
-                None,
-                Some(&raw_content),
-                turn_response.as_deref(),
-                &recall_item_ids,
-            )
-            .await,
-            BudgetStatus::Exhausted
-        ) {
-            if let Some(client) = ctx.memory_client.as_ref() {
-                flush_ingest_buffer(&mut ingest_buffer, client, None, None, None).await;
+        if let Some(manager) = &hot.job_manager {
+            if !ptc_requests.is_empty() {
+                let session = PtcSessionContext {
+                    channel: "cli".to_string(),
+                    session_id: "cli-user".to_string(),
+                    sender: "user".to_string(),
+                    main_model_request: main_model_request.clone(),
+                };
+                manager.launch_requests(&session, ptc_requests).await;
             }
-            eprintln!("Token budget exhausted. Ending session.");
-            break;
         }
+        if let Some(notice) = ptc_parse_notice {
+            pending.push(channels::ChannelMessage {
+                sender: "__ptc_notice__".to_string(),
+                session_id: "cli-user".to_string(),
+                content: notice,
+                content_parts: None,
+                channel: "cli".to_string(),
+                origin: ChannelMessageOrigin::RuntimePtcNotice,
+                related_job_id: None,
+            });
+        }
+
+        eprintln!(
+            "[tokens: in={}, out={}, total={}]",
+            agent.total_usage.input_tokens,
+            agent.total_usage.output_tokens,
+            agent.total_usage.input_tokens + agent.total_usage.output_tokens,
+        );
+
+        let assistant_response = agent.history.last().map(|message| message.text_content());
+        post_turn(
+            agent,
+            PostTurnInput {
+                memory_service: ctx.memory_service.clone(),
+                memory_analyzer: Some((
+                    Arc::clone(&hot.compression_provider.0),
+                    hot.compression_provider.1.clone(),
+                )),
+                turn_id,
+                session_id: "cli-user".to_string(),
+                entity_id: cli_entity_id.unwrap_or("self").to_string(),
+                channel: Some("cli".to_string()),
+                input_origin: provider_message_origin(msg.origin),
+                turn_input_content: turn_input_content.clone(),
+                assistant_response,
+            },
+        )
+        .await;
 
         if let Err(e) = agent.save_session(sessions_dir, Some("latest")) {
             tracing::debug!("Failed to save session: {e}");
+        }
+
+        for feedback in
+            drain_queued_commands(&mut queued_commands, agent, hot, ctx, Some("cli:cli-user")).await
+        {
+            eprintln!("{feedback}");
         }
 
         print!("zerda> ");
         if let Err(e) = std::io::stdout().flush() {
             tracing::debug!("Failed to flush prompt: {e}");
         }
-    }
-
-    if let Some(client) = ctx.memory_client.as_ref() {
-        flush_ingest_buffer(&mut ingest_buffer, client, None, None, None).await;
     }
 
     Ok(())
@@ -644,6 +651,15 @@ pub async fn run_serve(
     }
 
     let (tx, mut rx) = mpsc::channel::<channels::ChannelMessage>(32);
+    hot.job_manager = Some(Arc::new(JobManager::new(
+        tx.clone(),
+        hot.cfg.agent.tool_timeout,
+        hot.cfg.agent.disabled_primitives.clone(),
+        (
+            Arc::clone(&hot.compression_provider.0),
+            hot.compression_provider.1.clone(),
+        ),
+    )));
 
     for (name, ch) in &channels {
         let ch = Arc::clone(ch);
@@ -661,81 +677,6 @@ pub async fn run_serve(
     tracing::info!("Serving {} channel(s)...", channels.len());
     let mut pending: Vec<channels::ChannelMessage> = Vec::new();
     let mut session_agents: HashMap<String, agent::Agent> = HashMap::new();
-    let mut session_recipients: HashMap<String, String> = HashMap::new();
-    let mut session_ingest_buffers: HashMap<String, IngestBuffer> = HashMap::new();
-
-    let memory_dir = config::resolve_path(config::MEMORY_DIR);
-    let reload_marker = memory_dir.join(".reload-pending");
-    let reply_ctx_path = memory_dir.join(".reply-context");
-    if reload_marker.exists() {
-        if let Err(e) = std::fs::remove_file(&reload_marker) {
-            tracing::warn!(
-                "Failed to remove reload marker {}: {e}",
-                reload_marker.display()
-            );
-        }
-        if let Some(target) = load_reply_target(&reply_ctx_path) {
-            match target {
-                ReplyTarget::Unicast {
-                    channel,
-                    sender,
-                    session_id,
-                } => {
-                    let session_key = format!("{channel}:{session_id}");
-                    let storage_id = format!("{channel}-{}", hex::encode(session_id.as_bytes()));
-                    let mut notify_agent =
-                        if let Some(existing) = session_agents.remove(&session_key) {
-                            existing
-                        } else {
-                            let mut fresh = agent::Agent::new(
-                                hot.cfg.agent.clone(),
-                                (
-                                    Arc::clone(&hot.compression_provider.0),
-                                    hot.compression_provider.1.clone(),
-                                ),
-                            );
-                            if let Ok((loaded_id, history)) =
-                                agent::Agent::load_session(sessions_dir, Some(&storage_id))
-                            {
-                                tracing::info!("Resumed session {loaded_id} for {session_key}");
-                                fresh.history = history;
-                            }
-                            fresh
-                        };
-                    let notify_msg = "[System] Configuration reloaded successfully. \
-                         Briefly inform the user that the reload completed and services are back online."
-                        .to_string();
-                    notify_agent.push_user_message(notify_msg);
-                    let supplement = channels.get(&channel).and_then(|ch| ch.prompt_supplement());
-                    refresh_prompt(&mut notify_agent, hot, supplement.as_deref());
-
-                    let response = match notify_agent
-                        .run_turn(hot.active_provider.as_ref(), &hot.tools, &hot.chat_opts)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!("Failed to generate reload notification: {e}");
-                            "Configuration reloaded successfully.".to_string()
-                        }
-                    };
-
-                    if let Some(ch) = channels.get(&channel) {
-                        if let Err(e) = ch.send(&response, &sender).await {
-                            tracing::warn!("Failed to send reload notification: {e}");
-                        }
-                    } else {
-                        tracing::info!("Reload notification: {response}");
-                    }
-                    if let Err(e) = notify_agent.save_session(sessions_dir, Some(&storage_id)) {
-                        tracing::warn!("Failed to save session {storage_id}: {e}");
-                    }
-                    session_recipients.insert(session_key.clone(), sender);
-                    session_agents.insert(session_key, notify_agent);
-                }
-            }
-        }
-    }
 
     loop {
         let msg = if let Some(idx) = pending.iter().position(|_| true) {
@@ -752,20 +693,26 @@ pub async fn run_serve(
         let sender = msg.sender;
         let session_id = msg.session_id;
         let channel_name = msg.channel;
+        let origin = msg.origin;
         let turn_id = Uuid::new_v4().to_string();
+        let trace_id = Uuid::new_v4().to_string();
         let turn_started = Instant::now();
         let mut queued_cancel = false;
 
         while let Ok(next) = rx.try_recv() {
             if next.session_id == session_id
                 && next.channel == channel_name
+                && matches!(next.origin, ChannelMessageOrigin::Human)
                 && commands::is_cancel_command(&next.content)
             {
                 queued_cancel = true;
                 continue;
             }
             if next.session_id == session_id && next.channel == channel_name {
-                if commands::is_command(&next.content) {
+                if !matches!(origin, ChannelMessageOrigin::Human)
+                    || !matches!(next.origin, ChannelMessageOrigin::Human)
+                    || commands::is_command(&next.content)
+                {
                     pending.push(next);
                 } else {
                     content.push('\n');
@@ -784,31 +731,22 @@ pub async fn run_serve(
         let turn_span = tracing::info_span!(
             "turn",
             turn_id = %turn_id,
+            trace_id = %trace_id,
             channel = %channel_name,
             session_id = %session_id,
             sender = %sender
         );
         tracing::info!(
             parent: &turn_span,
+            event = "runner.turn.start",
             content_chars = content.chars().count(),
             has_content_parts = content_parts.as_ref().is_some_and(|parts| !parts.is_empty()),
             "Turn start"
         );
 
-        let memory_dir = config::resolve_path(config::MEMORY_DIR);
-        let reply_target = ReplyTarget::Unicast {
-            channel: channel_name.clone(),
-            sender: sender.clone(),
-            session_id: session_id.clone(),
-        };
-        if let Err(e) = save_reply_target(&memory_dir.join(".reply-context"), &reply_target) {
-            tracing::warn!("Failed to save reply context: {e}");
-        }
-
         let ch = channels.get(&channel_name).cloned();
         let session_key = format!("{channel_name}:{session_id}");
         let storage_id = format!("{channel_name}-{}", hex::encode(session_id.as_bytes()));
-        session_recipients.insert(session_key.clone(), sender.clone());
 
         let mut session_agent = if let Some(existing) = session_agents.remove(&session_key) {
             existing
@@ -829,45 +767,74 @@ pub async fn run_serve(
             fresh
         };
 
-        match commands::try_handle_command(&content, &mut session_agent, hot, ctx).await {
-            commands::CommandResult::Handled(feedback) => {
-                if let Some(ref ch) = ch {
-                    if let Err(e) = ch.send(&feedback, &sender).await {
-                        tracing::warn!("Failed to send command feedback: {e}");
+        if matches!(origin, ChannelMessageOrigin::Human) {
+            match commands::try_handle_command(
+                &content,
+                &mut session_agent,
+                hot,
+                ctx,
+                Some(&session_key),
+            )
+            .await
+            {
+                commands::CommandResult::Handled(feedback) => {
+                    if let Some(ref ch) = ch {
+                        if let Err(e) = ch.send(&feedback, &sender).await {
+                            tracing::warn!("Failed to send command feedback: {e}");
+                        }
                     }
-                }
-                if !session_agent.history.is_empty() {
-                    if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
-                        tracing::warn!("Failed to save session {storage_id}: {e}");
+                    if !session_agent.history.is_empty() {
+                        if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id))
+                        {
+                            tracing::warn!("Failed to save session {storage_id}: {e}");
+                        }
                     }
+                    tracing::info!(
+                        parent: &turn_span,
+                        event = "runner.turn.done",
+                        elapsed_ms = turn_started.elapsed().as_millis(),
+                        response_chars = feedback.chars().count(),
+                        "Turn done"
+                    );
+                    session_agents.insert(session_key, session_agent);
+                    continue;
                 }
-                tracing::info!(
-                    parent: &turn_span,
-                    elapsed_ms = turn_started.elapsed().as_millis(),
-                    response_chars = feedback.chars().count(),
-                    "Turn done"
-                );
-                session_agents.insert(session_key, session_agent);
-                continue;
+                commands::CommandResult::NotACommand => {}
             }
-            commands::CommandResult::NotACommand => {}
         }
 
         let supplement = ch.as_ref().and_then(|c| c.prompt_supplement());
         let snapshot = session_agent.snapshot_turn();
-        hot.todo.set_session(&session_key);
-        let serve_entity_id = format!("{channel_name}:{sender}");
-        let raw_content = content.clone();
-        let recall_item_ids = prepare_user_turn(
+        let mut queued_commands: VecDeque<commands::Command> = VecDeque::new();
+        let related_job_id = msg.related_job_id;
+        let entity_id = ctx
+            .memory_service
+            .as_ref()
+            .map(|service| service.entity_id());
+        let turn_input_content = Some(content.clone());
+        let memory_block = if let Some(text) = turn_input_content
+            .as_deref()
+            .filter(|_| matches!(origin, ChannelMessageOrigin::Human))
+        {
+            recall_memory_block(ctx.memory_service.as_ref(), entity_id, text).await
+        } else {
+            None
+        };
+        prepare_user_turn(
             &mut session_agent,
             hot,
-            content,
-            content_parts,
-            supplement.as_deref(),
-            ctx.memory_client.as_ref(),
-            Some(&serve_entity_id),
+            PrepareUserTurnInput {
+                content,
+                content_parts,
+                channel_supplement: supplement,
+                session_key: Some(session_key.clone()),
+                memory_block,
+                origin: provider_message_origin(origin),
+                related_job_id,
+            },
         )
         .await;
+        let main_model_request = current_main_model_request(&session_agent);
 
         let typing_cancel = CancellationToken::new();
         if let Some(ref ch) = ch {
@@ -894,30 +861,6 @@ pub async fn run_serve(
             );
         }
 
-        let mut tool_phase_handle = None;
-        let mut tool_phase_buffer = None;
-        let tool_phase_tx = if let Some(ref ch_ref) = ch {
-            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-            let ch = Arc::clone(ch_ref);
-            let sender = sender.clone();
-            let span = turn_span.clone();
-            tool_phase_handle = Some(tokio::spawn(
-                async move {
-                    while let Some(message) = rx.recv().await {
-                        if let Err(e) = ch.send(&message, &sender).await {
-                            tracing::warn!("Failed to send tool-phase message: {e}");
-                        }
-                    }
-                }
-                .instrument(span),
-            ));
-            Some(tx)
-        } else {
-            tool_phase_buffer = Some(Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
-            None
-        };
-        let captured_messages = tool_phase_buffer.as_ref().map(Arc::clone);
-        let tool_phase_tx_for_cb = tool_phase_tx.clone();
         let mut live_stream_handle = None;
         let live_stream_tx = if let Some(ref ch_ref) = ch {
             let (tx, rx) = mpsc::unbounded_channel::<LiveStreamEvent>();
@@ -932,39 +875,19 @@ pub async fn run_serve(
             None
         };
         let live_stream_tx_for_delta = live_stream_tx.clone();
-        let live_stream_tx_for_cb = live_stream_tx.clone();
         let mut cancelled = queued_cancel;
+        let mut post_cancel_command = None;
         let mut rx_closed = false;
-        let mut response = String::new();
+        let mut turn_output = None;
+        let mut turn_error: Option<String> = None;
         if !cancelled {
             let run_turn = session_agent
-                .run_turn_stream(
+                .collect_turn_stream_output(
                     hot.active_provider.as_ref(),
-                    &hot.tools,
                     &hot.chat_opts,
                     move |delta| {
                         if let Some(tx) = &live_stream_tx_for_delta {
                             let _ = tx.send(LiveStreamEvent::Delta(delta.to_string()));
-                        }
-                    },
-                    move |text, has_tool_calls| {
-                        if has_tool_calls {
-                            if let Some(tx) = &live_stream_tx_for_cb {
-                                let _ = tx.send(LiveStreamEvent::Reset);
-                            }
-                            if let Some(message) = normalize_tool_phase_message(text) {
-                                let chars = message.chars().count();
-                                tracing::debug!(chars, "Captured tool-phase assistant content");
-                                if let Some(tx) = &tool_phase_tx_for_cb {
-                                    if tx.send(message).is_err() {
-                                        tracing::warn!(
-                                            "Tool-phase sender channel closed before delivery"
-                                        );
-                                    }
-                                } else if let Some(buffer) = &captured_messages {
-                                    buffer.lock().unwrap().push(message);
-                                }
-                            }
                         }
                     },
                 )
@@ -974,11 +897,18 @@ pub async fn run_serve(
             loop {
                 tokio::select! {
                     result = &mut run_turn => {
-                        response = match result {
-                            Ok(r) => r,
+                        turn_output = match result {
+                            Ok(r) => Some(r),
                             Err(e) => {
-                                tracing::error!(channel = %channel_name, sender = %sender, "Turn failed: {e}");
-                                format!("Error: {e}")
+                                tracing::error!(
+                                    event = "runner.turn.error",
+                                    error_kind = "provider",
+                                    channel = %channel_name,
+                                    sender = %sender,
+                                    "Turn failed: {e}"
+                                );
+                                turn_error = Some(format!("{e}"));
+                                None
                             }
                         };
                         break;
@@ -988,14 +918,48 @@ pub async fn run_serve(
                             Some(next) => {
                                 if next.session_id == session_id
                                     && next.channel == channel_name
-                                    && commands::is_cancel_command(&next.content)
+                                    && matches!(next.origin, ChannelMessageOrigin::Human)
                                 {
-                                    cancelled = true;
-                                    tracing::info!(
-                                        parent: &turn_span,
-                                        "Turn cancel requested by user"
-                                    );
-                                    break;
+                                    if let Some(command) = commands::parse_command(&next.content) {
+                                        let dispatch = dispatch_busy_command(
+                                            command,
+                                            &session_agent,
+                                            hot,
+                                            Some(&session_key),
+                                            &mut queued_commands,
+                                        )
+                                        .await;
+                                        for feedback in dispatch.feedback {
+                                            if let Some(ref ch) = ch {
+                                                if let Err(e) = ch.send(&feedback, &sender).await {
+                                                    tracing::warn!("Failed to send command feedback: {e}");
+                                                }
+                                            }
+                                        }
+                                        match dispatch.action {
+                                            BusyTurnAction::Continue => {}
+                                            BusyTurnAction::CancelOnly => {
+                                                cancelled = true;
+                                                tracing::info!(
+                                                    parent: &turn_span,
+                                                    event = "runner.turn.cancel.requested",
+                                                    "Turn cancel requested by user"
+                                                );
+                                                break;
+                                            }
+                                            BusyTurnAction::CancelAndRun(command) => {
+                                                cancelled = true;
+                                                post_cancel_command = Some(command);
+                                                tracing::info!(
+                                                    parent: &turn_span,
+                                                    event = "runner.turn.cancel.requested",
+                                                    "Turn cancel requested by command"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 }
                                 pending.push(next);
                             }
@@ -1007,18 +971,13 @@ pub async fn run_serve(
         } else {
             tracing::info!(
                 parent: &turn_span,
+                event = "runner.turn.cancel.pre_execution",
                 "Turn cancel requested before execution started"
             );
         }
 
         typing_cancel.cancel();
-        drop(tool_phase_tx);
         drop(live_stream_tx);
-        if let Some(handle) = tool_phase_handle {
-            if let Err(e) = handle.await {
-                tracing::warn!("Tool-phase sender task panicked: {e}");
-            }
-        }
         let live_stream_summary = if let Some(handle) = live_stream_handle {
             match handle.await {
                 Ok(summary) => summary,
@@ -1037,26 +996,44 @@ pub async fn run_serve(
                 if let Err(e) = ch.send("Current turn cancelled", &sender).await {
                     tracing::warn!("Failed to send cancel feedback via {}: {e}", channel_name);
                 }
+                if let Some(command) = post_cancel_command.take() {
+                    let feedback = commands::execute_stateful_command(
+                        &command,
+                        &mut session_agent,
+                        hot,
+                        ctx,
+                        Some(&session_key),
+                    )
+                    .await;
+                    if let Err(e) = ch.send(&feedback, &sender).await {
+                        tracing::warn!("Failed to send command feedback via {}: {e}", channel_name);
+                    }
+                }
+                for feedback in drain_queued_commands(
+                    &mut queued_commands,
+                    &mut session_agent,
+                    hot,
+                    ctx,
+                    Some(&session_key),
+                )
+                .await
+                {
+                    if let Err(e) = ch.send(&feedback, &sender).await {
+                        tracing::warn!(
+                            "Failed to send queued command feedback via {}: {e}",
+                            channel_name
+                        );
+                    }
+                }
             } else {
                 println!("Current turn cancelled");
             }
             tracing::info!(
                 parent: &turn_span,
+                event = "runner.turn.cancelled",
                 elapsed_ms = turn_started.elapsed().as_millis(),
                 "Turn cancelled"
             );
-            if let Some(client) = ctx.memory_client.as_ref() {
-                if let Some(buf) = session_ingest_buffers.get_mut(&session_key) {
-                    flush_ingest_buffer(
-                        buf,
-                        client,
-                        Some(&serve_entity_id),
-                        Some(&session_id),
-                        Some(&channel_name),
-                    )
-                    .await;
-                }
-            }
             if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
                 tracing::warn!("Failed to save session {storage_id}: {e}");
             }
@@ -1064,8 +1041,59 @@ pub async fn run_serve(
             continue;
         }
 
+        let Some(turn_output) = turn_output else {
+            session_agent.restore_turn(snapshot);
+            if let Some(ref ch) = ch {
+                let msg = match turn_error {
+                    Some(detail) => format!("Error: {detail}"),
+                    None => "Error: turn did not complete".to_string(),
+                };
+                let _ = ch.send(&msg, &sender).await;
+            }
+            session_agents.insert(session_key, session_agent);
+            continue;
+        };
+        let agent::AssistantTurnResult {
+            visible_text: response,
+            ptc_requests,
+            ptc_parse_notice,
+        } = match session_agent.finish_streamed_turn(turn_output) {
+            Ok(result) => result,
+            Err(e) => {
+                session_agent.restore_turn(snapshot);
+                if let Some(ref ch) = ch {
+                    let _ = ch.send(&format!("Error: {e}"), &sender).await;
+                }
+                session_agents.insert(session_key, session_agent);
+                continue;
+            }
+        };
+        if let Some(manager) = &hot.job_manager {
+            if !ptc_requests.is_empty() {
+                let session = PtcSessionContext {
+                    channel: channel_name.clone(),
+                    session_id: session_id.clone(),
+                    sender: sender.clone(),
+                    main_model_request: main_model_request.clone(),
+                };
+                manager.launch_requests(&session, ptc_requests).await;
+            }
+        }
+        if let Some(notice) = ptc_parse_notice {
+            pending.push(channels::ChannelMessage {
+                sender: sender.clone(),
+                session_id: session_id.clone(),
+                content: notice,
+                content_parts: None,
+                channel: channel_name.clone(),
+                origin: ChannelMessageOrigin::RuntimePtcNotice,
+                related_job_id: None,
+            });
+        }
+
         if let Some(ref ch) = ch {
             tracing::debug!(
+                event = "runner.turn.response.dispatch",
                 final_response_chars = response.chars().count(),
                 "Sending assistant messages"
             );
@@ -1082,15 +1110,6 @@ pub async fn run_serve(
                 }
             }
         } else {
-            if let Some(buffer) = tool_phase_buffer {
-                let captured_tool_phase = {
-                    let mut guard = buffer.lock().unwrap();
-                    std::mem::take(&mut *guard)
-                };
-                for message in captured_tool_phase {
-                    println!("{}", channels::cli::sanitize_terminal_text(&message));
-                }
-            }
             if let Some(final_message) = normalize_final_message(&response) {
                 println!("{}", channels::cli::sanitize_terminal_text(&final_message));
             }
@@ -1098,109 +1117,56 @@ pub async fn run_serve(
 
         tracing::info!(
             parent: &turn_span,
+            event = "runner.turn.done",
             elapsed_ms = turn_started.elapsed().as_millis(),
             response_chars = response.chars().count(),
             "Turn done"
         );
 
-        check_reload(&mut session_agent, ctx, hot, supplement.as_deref()).await;
-
-        if matches!(
-            post_turn(
-                &mut session_agent,
-                hot,
-                ctx.memory_client.as_ref(),
-                Some(
-                    session_ingest_buffers
-                        .entry(session_key.clone())
-                        .or_insert_with(|| IngestBuffer::new(
-                            hot.cfg.memory_service.ingest_batch_turns
-                        )),
-                ),
-                Some(&serve_entity_id),
-                Some(&session_id),
-                Some(&turn_id),
-                Some(&channel_name),
-                Some(&raw_content),
-                Some(&response),
-                &recall_item_ids,
-            )
-            .await,
-            BudgetStatus::Exhausted
-        ) {
-            tracing::warn!("Token budget exhausted for session {session_key}");
-            if let Some(client) = ctx.memory_client.as_ref() {
-                if let Some(buf) = session_ingest_buffers.get_mut(&session_key) {
-                    flush_ingest_buffer(
-                        buf,
-                        client,
-                        Some(&serve_entity_id),
-                        Some(&session_id),
-                        Some(&channel_name),
-                    )
-                    .await;
-                }
-            }
-            if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
-                tracing::warn!("Failed to save session {storage_id}: {e}");
-            }
-            session_agents.insert(session_key, session_agent);
-            continue;
-        }
+        post_turn(
+            &mut session_agent,
+            PostTurnInput {
+                memory_service: ctx.memory_service.clone(),
+                memory_analyzer: Some((
+                    Arc::clone(&hot.compression_provider.0),
+                    hot.compression_provider.1.clone(),
+                )),
+                turn_id,
+                session_id,
+                entity_id: entity_id.unwrap_or("self").to_string(),
+                channel: Some(channel_name.clone()),
+                input_origin: provider_message_origin(origin),
+                turn_input_content,
+                assistant_response: Some(response),
+            },
+        )
+        .await;
 
         if let Err(e) = session_agent.save_session(sessions_dir, Some(&storage_id)) {
             tracing::warn!("Failed to save session {storage_id}: {e}");
         }
+        if let Some(ref ch) = ch {
+            for feedback in drain_queued_commands(
+                &mut queued_commands,
+                &mut session_agent,
+                hot,
+                ctx,
+                Some(&session_key),
+            )
+            .await
+            {
+                if let Err(e) = ch.send(&feedback, &sender).await {
+                    tracing::warn!(
+                        "Failed to send queued command feedback via {}: {e}",
+                        channel_name
+                    );
+                }
+            }
+        }
         session_agents.insert(session_key, session_agent);
     }
 
-    if let Some(client) = ctx.memory_client.as_ref() {
-        for (session_key, buffer) in &mut session_ingest_buffers {
-            let Some((channel, session_id)) = session_key.split_once(':') else {
-                tracing::warn!(
-                    session_key,
-                    "Invalid session key while flushing memory buffer"
-                );
-                continue;
-            };
-            let Some(sender) = session_recipients.get(session_key) else {
-                tracing::warn!(
-                    session_key,
-                    "Missing session recipient while flushing memory buffer"
-                );
-                continue;
-            };
-            let entity_id = format!("{channel}:{sender}");
-            flush_ingest_buffer(
-                buffer,
-                client,
-                Some(&entity_id),
-                Some(session_id),
-                Some(channel),
-            )
-            .await;
-        }
-    }
-
     Ok(())
-}
-
-fn normalize_tool_phase_message(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let no_trailing_ws = trimmed.trim_end();
-    let no_colon = no_trailing_ws
-        .strip_suffix('：')
-        .or_else(|| no_trailing_ws.strip_suffix(':'))
-        .unwrap_or(no_trailing_ws)
-        .trim_end();
-    if no_colon.is_empty() {
-        None
-    } else {
-        Some(no_colon.to_string())
-    }
 }
 
 fn normalize_final_message(raw: &str) -> Option<String> {
@@ -1214,7 +1180,6 @@ fn normalize_final_message(raw: &str) -> Option<String> {
 
 enum LiveStreamEvent {
     Delta(String),
-    Reset,
 }
 
 #[derive(Default)]
@@ -1223,16 +1188,11 @@ struct LiveStreamDispatchSummary {
     overflowed: bool,
 }
 
-fn apply_live_stream_event(
-    event: LiveStreamEvent,
-    stream_text: &mut String,
-    overflowed: &mut bool,
-) {
+fn apply_live_stream_event(event: LiveStreamEvent, stream_text: &mut String) -> bool {
     match event {
-        LiveStreamEvent::Delta(delta) => stream_text.push_str(&delta),
-        LiveStreamEvent::Reset => {
-            stream_text.clear();
-            *overflowed = false;
+        LiveStreamEvent::Delta(delta) => {
+            stream_text.push_str(&delta);
+            true
         }
     }
 }
@@ -1245,11 +1205,24 @@ async fn dispatch_live_stream(
     let mut summary = LiveStreamDispatchSummary::default();
     let mut stream_text = String::new();
     let mut disabled = false;
+    let started = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut delta_chunks = 0u64;
+    let progress_interval_ms = stream_progress_interval_ms();
+    tracing::debug!(
+        event = "runner.stream.start",
+        progress_interval_ms,
+        "Live stream dispatch started"
+    );
 
     while let Some(event) = rx.recv().await {
-        apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+        if apply_live_stream_event(event, &mut stream_text) {
+            delta_chunks += 1;
+        }
         while let Ok(event) = rx.try_recv() {
-            apply_live_stream_event(event, &mut stream_text, &mut summary.overflowed);
+            if apply_live_stream_event(event, &mut stream_text) {
+                delta_chunks += 1;
+            }
         }
 
         if disabled {
@@ -1261,9 +1234,20 @@ async fn dispatch_live_stream(
             continue;
         }
         let clean_chars = clean_text.chars().count();
+        if last_progress.elapsed().as_millis() >= u128::from(progress_interval_ms) {
+            tracing::debug!(
+                event = "runner.stream.progress",
+                elapsed_ms = started.elapsed().as_millis(),
+                delta_chunks,
+                clean_chars,
+                "Live stream progress"
+            );
+            last_progress = Instant::now();
+        }
         if clean_chars > config::STREAM_OVERFLOW_CHARS {
             if !summary.overflowed {
                 tracing::debug!(
+                    event = "runner.stream.overflow",
                     clean_chars,
                     max_chars = config::STREAM_OVERFLOW_CHARS,
                     "Live stream overflow reached; skip intermediate updates"
@@ -1279,7 +1263,10 @@ async fn dispatch_live_stream(
                 .send_stream_update(&recipient, &message_id, &update)
                 .await
             {
-                tracing::warn!("Failed to send live stream update: {e}");
+                tracing::warn!(
+                    event = "runner.stream.update.error",
+                    "Failed to send live stream update: {e}"
+                );
                 summary.stream_message_id = None;
                 disabled = true;
             }
@@ -1294,11 +1281,23 @@ async fn dispatch_live_stream(
                 disabled = true;
             }
             Err(e) => {
-                tracing::warn!("Failed to start live stream: {e}");
+                tracing::warn!(
+                    event = "runner.stream.start.error",
+                    "Failed to start live stream: {e}"
+                );
                 disabled = true;
             }
         }
     }
+
+    tracing::debug!(
+        event = "runner.stream.done",
+        elapsed_ms = started.elapsed().as_millis(),
+        delta_chunks,
+        overflowed = summary.overflowed,
+        has_stream_message = summary.stream_message_id.is_some(),
+        "Live stream dispatch done"
+    );
 
     summary
 }
@@ -1324,7 +1323,10 @@ async fn send_final_message(
             .send_stream_update(recipient, message_id, &clean_text)
             .await
         {
-            tracing::warn!("Failed to finalize stream update, falling back to send: {e}");
+            tracing::warn!(
+                event = "runner.stream.finalize.error",
+                "Failed to finalize stream update, falling back to send: {e}"
+            );
             channel.send(&clean_text, recipient).await?;
         }
     } else {
@@ -1335,31 +1337,4 @@ async fn send_final_message(
         channel.send(&marker, recipient).await?;
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-enum ReplyTarget {
-    Unicast {
-        channel: String,
-        sender: String,
-        session_id: String,
-    },
-}
-
-fn save_reply_target(path: &Path, target: &ReplyTarget) -> Result<()> {
-    let data = serde_json::to_vec(target)?;
-    std::fs::write(path, data)?;
-    Ok(())
-}
-
-fn load_reply_target(path: &Path) -> Option<ReplyTarget> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<ReplyTarget>(&raw) {
-        Ok(target) => Some(target),
-        Err(e) => {
-            tracing::warn!("Invalid reply context at {}: {e}", path.display());
-            None
-        }
-    }
 }

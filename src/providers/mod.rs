@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{ProviderEndpoint, RetryConfig};
-use crate::logging::{summarize_json, summarize_text};
+use crate::logging::{summarize_http_body, summarize_json, summarize_text, text_fingerprint};
 
 pub mod anthropic;
 pub mod openai_chat;
@@ -23,10 +23,6 @@ pub enum Role {
     System,
     User,
     Assistant,
-    ToolResult {
-        tool_call_id: String,
-        is_error: bool,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,16 +32,37 @@ pub enum ContentPart {
     ImageBase64 { media_type: String, data: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    #[default]
+    Human,
+    RuntimePtcResult,
+    RuntimePtcNotice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MessageMetadata {
+    #[serde(default)]
+    pub origin: MessageOrigin,
+    #[serde(default)]
+    pub related_job_id: Option<String>,
+    #[serde(default)]
+    pub related_turn_id: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub role: Role,
     pub content: Vec<ContentPart>,
     #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(default)]
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub thinking_blocks: Vec<ThinkingBlock>,
+    #[serde(default)]
+    pub metadata: MessageMetadata,
 }
 
 impl ConversationMessage {
@@ -53,9 +70,9 @@ impl ConversationMessage {
         Self {
             role: Role::User,
             content: vec![ContentPart::Text(text.into())],
-            tool_calls: Vec::new(),
             reasoning_content: None,
             thinking_blocks: Vec::new(),
+            metadata: MessageMetadata::default(),
         }
     }
 
@@ -63,26 +80,9 @@ impl ConversationMessage {
         Self {
             role: Role::User,
             content: parts,
-            tool_calls: Vec::new(),
             reasoning_content: None,
             thinking_blocks: Vec::new(),
-        }
-    }
-
-    pub fn tool_result(
-        tool_call_id: impl Into<String>,
-        text: impl Into<String>,
-        is_error: bool,
-    ) -> Self {
-        Self {
-            role: Role::ToolResult {
-                tool_call_id: tool_call_id.into(),
-                is_error,
-            },
-            content: vec![ContentPart::Text(text.into())],
-            tool_calls: Vec::new(),
-            reasoning_content: None,
-            thinking_blocks: Vec::new(),
+            metadata: MessageMetadata::default(),
         }
     }
 
@@ -96,22 +96,6 @@ impl ConversationMessage {
             .collect::<Vec<_>>()
             .join("")
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_content: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSpec {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,7 +273,6 @@ pub fn is_dual_sampling_conflict_error(err: &anyhow::Error) -> bool {
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
     pub text: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub reasoning_content: Option<String>,
     pub thinking_blocks: Vec<ThinkingBlock>,
@@ -298,15 +281,6 @@ pub struct ProviderResponse {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
-    ToolCallStart {
-        id: String,
-        name: String,
-        extra_content: Option<Value>,
-    },
-    ToolCallDelta {
-        id: String,
-        args_chunk: String,
-    },
     AssistantMeta(Value),
     Done(Usage),
 }
@@ -388,20 +362,17 @@ pub trait Provider: Send + Sync {
     async fn chat(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<ProviderResponse>;
 
     async fn chat_stream(
         &self,
         messages: &[ConversationMessage],
-        tools: &[ToolSpec],
         opts: &ChatOptions,
     ) -> Result<StreamResult> {
-        let response = self.chat(messages, tools, opts).await?;
+        let response = self.chat(messages, opts).await?;
         let ProviderResponse {
             text,
-            tool_calls,
             usage,
             reasoning_content,
             thinking_blocks,
@@ -421,17 +392,6 @@ pub trait Provider: Send + Sync {
                 "kind": "anthropic_thinking_block",
                 "block": block
             }))));
-        }
-        for tc in &tool_calls {
-            events.push(Ok(StreamEvent::ToolCallStart {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                extra_content: tc.extra_content.clone(),
-            }));
-            events.push(Ok(StreamEvent::ToolCallDelta {
-                id: tc.id.clone(),
-                args_chunk: tc.arguments.to_string(),
-            }));
         }
         events.push(Ok(StreamEvent::Done(usage.unwrap_or_default())));
         Ok(Box::pin(futures::stream::iter(events)))
@@ -557,12 +517,20 @@ impl HttpClient {
         })?;
 
         if !status.is_success() {
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+            let payload = summarize_json(body);
             let error_msg = resp_body
                 .get("error")
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("Unknown error");
-            anyhow::bail!("{provider_name} API error ({status}): {error_msg}");
+            anyhow::bail!(
+                "{provider_name} API error ({status}) method=POST url={url} model={model} stream={stream} payload={payload}: {error_msg}"
+            );
         }
 
         Ok(resp_body)
@@ -588,7 +556,7 @@ impl HttpClient {
             let error_msg = serde_json::from_str::<Value>(&raw_text)
                 .ok()
                 .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                .unwrap_or_else(|| summarize_text(&raw_text).to_string());
+                .unwrap_or_else(|| summarize_http_body(&raw_text));
             anyhow::bail!("{provider_name} API error ({status}): {error_msg}");
         }
 
@@ -616,11 +584,19 @@ impl HttpClient {
         let status = resp.status();
         if !status.is_success() {
             let raw_text = resp.text().await.unwrap_or_default();
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+            let payload = summarize_json(body);
             let msg = serde_json::from_str::<Value>(&raw_text)
                 .ok()
                 .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                .unwrap_or_else(|| format!("Raw response: {}", summarize_text(&raw_text)));
-            anyhow::bail!("{provider_name} API error ({status}): {msg}");
+                .unwrap_or_else(|| format!("Raw response: {}", summarize_http_body(&raw_text)));
+            anyhow::bail!(
+                "{provider_name} API error ({status}) method=POST url={url} model={model} stream={stream} payload={payload}: {msg}"
+            );
         }
 
         Ok(resp)
@@ -634,21 +610,47 @@ impl HttpClient {
         provider_name: &str,
     ) -> Result<reqwest::Response> {
         let mut last_error: Option<anyhow::Error> = None;
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        let payload = summarize_json(body);
+        let request_fp = text_fingerprint(&format!("{url}|{payload}"));
+        let header_keys = headers
+            .iter()
+            .map(|(k, _)| *k)
+            .chain(self.extra_headers.keys().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(",");
 
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(
+                event = "provider.chat.request.trace",
                 provider = provider_name,
                 url = %url,
                 payload = %summarize_json(body),
                 "Provider request"
             );
         }
+        tracing::debug!(
+            event = "provider.chat.request.dispatch",
+            provider = provider_name,
+            url = %url,
+            model = %model,
+            stream,
+            request_fp = %request_fp,
+            header_keys = %header_keys,
+            payload = %payload,
+            "Provider request dispatch"
+        );
 
         for attempt in 0..=self.retry_config.max_retries {
             let attempt_started = Instant::now();
             if attempt > 0 {
                 let delay = self.compute_backoff(attempt, None);
                 tracing::info!(
+                    event = "provider.chat.retry.scheduled",
                     provider = provider_name,
                     attempt,
                     max_retries = self.retry_config.max_retries,
@@ -674,8 +676,14 @@ impl HttpClient {
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
                         tracing::warn!(
+                            event = "provider.chat.request.error",
+                            error_kind = "network",
                             provider = provider_name,
                             attempt,
+                            model = %model,
+                            stream,
+                            url = %url,
+                            request_fp = %request_fp,
                             elapsed_ms = attempt_started.elapsed().as_millis(),
                             "Provider network error: {e}"
                         );
@@ -698,10 +706,19 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| format!("Rate limited. Raw: {}", summarize_text(&raw_text)));
+                    .unwrap_or_else(|| {
+                        format!("Rate limited. Raw: {}", summarize_http_body(&raw_text))
+                    });
                 tracing::warn!(
+                    event = "provider.chat.response.error",
+                    error_kind = "rate_limited",
                     provider = provider_name,
+                    status = %status,
                     attempt,
+                    model = %model,
+                    stream,
+                    url = %url,
+                    request_fp = %request_fp,
                     elapsed_ms = attempt_started.elapsed().as_millis(),
                     "Provider rate limited: {error_msg}"
                 );
@@ -718,24 +735,64 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| format!("Server error. Raw: {}", summarize_text(&raw_text)));
+                    .unwrap_or_else(|| {
+                        format!("Server error. Raw: {}", summarize_http_body(&raw_text))
+                    });
                 tracing::warn!(
+                    event = "provider.chat.response.error",
+                    error_kind = "provider_5xx",
                     provider = provider_name,
                     status = %status,
                     attempt,
+                    model = %model,
+                    stream,
+                    url = %url,
+                    request_fp = %request_fp,
                     elapsed_ms = attempt_started.elapsed().as_millis(),
                     "Provider server error: {error_msg}"
                 );
                 last_error = Some(anyhow::anyhow!(
-                    "{provider_name} API error ({status}): {error_msg}"
+                    "{provider_name} API error ({status}) method=POST url={url} model={model} stream={stream} payload={payload}: {error_msg}"
                 ));
                 continue;
             }
 
+            if status.is_client_error() {
+                let raw_text = resp.text().await.unwrap_or_default();
+                let error_msg = serde_json::from_str::<Value>(&raw_text)
+                    .ok()
+                    .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                    .unwrap_or_else(|| {
+                        format!("Client error. Raw: {}", summarize_http_body(&raw_text))
+                    });
+                tracing::warn!(
+                    event = "provider.chat.response.error",
+                    error_kind = "provider_4xx",
+                    provider = provider_name,
+                    status = %status,
+                    attempt,
+                    model = %model,
+                    stream,
+                    url = %url,
+                    request_fp = %request_fp,
+                    payload = %payload,
+                    elapsed_ms = attempt_started.elapsed().as_millis(),
+                    "Provider client error response: {error_msg}"
+                );
+                return Err(anyhow::anyhow!(
+                    "{provider_name} API error ({status}) method=POST url={url} model={model} stream={stream} payload={payload}: {error_msg}"
+                ));
+            }
+
             tracing::trace!(
+                event = "provider.chat.response.ok",
                 provider = provider_name,
                 status = %status,
                 attempt,
+                model = %model,
+                stream,
+                url = %url,
+                request_fp = %request_fp,
                 elapsed_ms = attempt_started.elapsed().as_millis(),
                 "Provider response"
             );
@@ -754,13 +811,19 @@ impl HttpClient {
     ) -> Result<reqwest::Response> {
         let mut last_error: Option<anyhow::Error> = None;
 
-        tracing::trace!(provider = provider_name, url = %url, "Provider GET request");
+        tracing::trace!(
+            event = "provider.get.request.trace",
+            provider = provider_name,
+            url = %url,
+            "Provider GET request"
+        );
 
         for attempt in 0..=self.retry_config.max_retries {
             let attempt_started = Instant::now();
             if attempt > 0 {
                 let delay = self.compute_backoff(attempt, None);
                 tracing::info!(
+                    event = "provider.get.retry.scheduled",
                     provider = provider_name,
                     attempt,
                     max_retries = self.retry_config.max_retries,
@@ -783,6 +846,8 @@ impl HttpClient {
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
                         tracing::warn!(
+                            event = "provider.get.request.error",
+                            error_kind = "network",
                             provider = provider_name,
                             attempt,
                             elapsed_ms = attempt_started.elapsed().as_millis(),
@@ -807,8 +872,12 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| format!("Rate limited. Raw: {}", summarize_text(&raw_text)));
+                    .unwrap_or_else(|| {
+                        format!("Rate limited. Raw: {}", summarize_http_body(&raw_text))
+                    });
                 tracing::warn!(
+                    event = "provider.get.response.error",
+                    error_kind = "rate_limited",
                     provider = provider_name,
                     attempt,
                     elapsed_ms = attempt_started.elapsed().as_millis(),
@@ -827,8 +896,12 @@ impl HttpClient {
                 let error_msg = serde_json::from_str::<Value>(&raw_text)
                     .ok()
                     .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| format!("Server error. Raw: {}", summarize_text(&raw_text)));
+                    .unwrap_or_else(|| {
+                        format!("Server error. Raw: {}", summarize_http_body(&raw_text))
+                    });
                 tracing::warn!(
+                    event = "provider.get.response.error",
+                    error_kind = "provider_5xx",
                     provider = provider_name,
                     status = %status,
                     attempt,
@@ -842,6 +915,7 @@ impl HttpClient {
             }
 
             tracing::trace!(
+                event = "provider.get.response.ok",
                 provider = provider_name,
                 status = %status,
                 attempt,

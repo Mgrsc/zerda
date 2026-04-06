@@ -17,21 +17,13 @@ pub struct Config {
     pub providers: Vec<ProviderEndpoint>,
     pub agent: AgentConfig,
     #[serde(default)]
-    pub reflection: ReflectionConfig,
-    #[serde(default)]
-    pub mcp: Vec<McpServerConfig>,
+    pub memory: MemoryConfig,
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
-    #[serde(default)]
-    pub tts: TtsConfig,
     #[serde(default)]
     pub stt: SttConfig,
     #[serde(default)]
     pub log: LogConfig,
-    #[serde(default)]
-    pub memory_service: MemoryServiceConfig,
-    #[serde(default)]
-    pub docs_search: DocsSearchConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,18 +106,10 @@ pub struct AgentConfig {
     pub primary_model: ModelConfig,
     #[serde(default)]
     pub fast_model: Option<ModelConfig>,
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
     #[serde(default = "default_max_history")]
     pub max_history: usize,
-    #[serde(default = "default_max_tool_output_chars")]
-    pub max_tool_output_chars: usize,
     #[serde(default = "default_identity_path")]
     pub identity_path: String,
-    #[serde(default)]
-    pub show_usage: bool,
-    #[serde(default)]
-    pub max_budget_tokens: Option<u64>,
     #[serde(default = "default_session_cleanup_days")]
     pub session_cleanup_days: u64,
     #[serde(default = "default_tool_timeout")]
@@ -134,16 +118,8 @@ pub struct AgentConfig {
     pub disabled_primitives: Vec<String>,
 }
 
-const MIN_MAX_ITERATIONS: usize = 10;
-
-const fn default_max_iterations() -> usize {
-    10
-}
 const fn default_max_history() -> usize {
     30
-}
-const fn default_max_tool_output_chars() -> usize {
-    30000
 }
 fn default_identity_path() -> String {
     "~/.zerda/identity.md".to_string()
@@ -156,104 +132,10 @@ const fn default_tool_timeout() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ReflectionConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, alias = "model")]
-    pub llm_model: String,
-    #[serde(default = "default_reflection_max_tokens")]
-    pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub embedding_model: Option<String>,
-    #[serde(default)]
-    pub embedding_dim: Option<u64>,
-    #[serde(default = "default_reflection_qdrant_url")]
-    pub qdrant_url: String,
-    #[serde(default)]
-    pub qdrant_api_key: String,
-}
-
-const fn default_reflection_max_tokens() -> Option<u32> {
-    Some(2048)
-}
-
-impl Default for ReflectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            llm_model: String::new(),
-            max_tokens: default_reflection_max_tokens(),
-            embedding_model: None,
-            embedding_dim: None,
-            qdrant_url: default_reflection_qdrant_url(),
-            qdrant_api_key: String::new(),
-        }
-    }
-}
-
-impl ReflectionConfig {
-    pub fn as_model_config(&self) -> Option<ModelConfig> {
-        let model = self.llm_model.trim();
-        if model.is_empty() {
-            return None;
-        }
-        Some(ModelConfig {
-            model: model.to_string(),
-            vision: false,
-            temperature: Some(0.7),
-            top_p: Some(0.95),
-            max_tokens: self.max_tokens,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpServerConfig {
-    pub name: String,
-    pub transport: String,
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct McpFile {
-    #[serde(default)]
-    mcp: Vec<McpServerConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct ChannelConfig {
     pub name: String,
     #[serde(flatten)]
     pub params: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TtsConfig {
-    pub provider: String,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default = "default_tts_model")]
-    pub model: String,
-    #[serde(default)]
-    pub voice_id: Option<String>,
-}
-
-impl Default for TtsConfig {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            api_key: None,
-            model: default_tts_model(),
-            voice_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -279,146 +161,108 @@ fn default_stt_model() -> String {
     "whisper-large-v3-turbo".to_string()
 }
 
-fn default_tts_model() -> String {
-    "speech-2.8-hd".to_string()
-}
-
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    #[serde(default)]
+    pub debug_plaintext: bool,
+    #[serde(default = "default_stream_progress_interval_ms")]
+    pub stream_progress_interval_ms: u64,
+    #[serde(default = "default_true")]
+    pub include_target: bool,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct MemoryServiceConfig {
+fn default_log_format() -> String {
+    "json".to_string()
+}
+
+const fn default_stream_progress_interval_ms() -> u64 {
+    2000
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_memory_service_url")]
+    #[serde(default)]
+    pub embedding: MemoryEmbeddingConfig,
+    #[serde(default)]
+    pub sqlite: MemorySqliteConfig,
+    #[serde(default)]
+    pub chroma: MemoryChromaConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryEmbeddingConfig {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub dimensions: usize,
+    #[serde(default = "default_memory_embedding_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for MemoryEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            dimensions: 0,
+            timeout_ms: default_memory_embedding_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemorySqliteConfig {
+    #[serde(default = "default_memory_sqlite_path")]
+    pub path: String,
+}
+
+impl Default for MemorySqliteConfig {
+    fn default() -> Self {
+        Self {
+            path: default_memory_sqlite_path(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryChromaConfig {
+    #[serde(default = "default_memory_chroma_url")]
     pub url: String,
-    #[serde(default)]
-    pub auth_token: String,
-    #[serde(default = "default_memory_tenant_id")]
-    pub tenant_id: String,
-    #[serde(default = "default_memory_entity_id")]
-    pub default_entity_id: String,
-    #[serde(default = "default_memory_process_id")]
-    pub process_id: String,
-    #[serde(default = "default_recall_timeout_ms")]
-    pub recall_timeout_ms: u64,
-    #[serde(default = "default_recall_top_k")]
-    pub recall_top_k: u32,
-    #[serde(default = "default_recall_min_score")]
-    pub recall_min_score: f64,
-    #[serde(default = "default_ingest_batch_turns")]
-    pub ingest_batch_turns: u32,
-    #[serde(default = "default_ingest_timeout_ms")]
-    pub ingest_timeout_ms: u64,
-    #[serde(default = "default_ingest_max_retries")]
-    pub ingest_max_retries: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct DocsSearchConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_docs_search_embedding_model")]
-    pub embedding_model: String,
-    #[serde(default = "default_docs_search_embedding_dim")]
-    pub embedding_dim: u64,
-    #[serde(default = "default_docs_search_qdrant_url")]
-    pub qdrant_url: String,
-    #[serde(default)]
-    pub qdrant_api_key: String,
-    #[serde(default = "default_docs_search_collection")]
-    pub collection: String,
-    #[serde(default = "default_docs_search_docs_dir")]
-    pub docs_dir: String,
-}
-
-impl Default for DocsSearchConfig {
+impl Default for MemoryChromaConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            embedding_model: default_docs_search_embedding_model(),
-            embedding_dim: default_docs_search_embedding_dim(),
-            qdrant_url: default_docs_search_qdrant_url(),
-            qdrant_api_key: String::new(),
-            collection: default_docs_search_collection(),
-            docs_dir: default_docs_search_docs_dir(),
+            url: default_memory_chroma_url(),
         }
     }
 }
 
-impl Default for MemoryServiceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            url: default_memory_service_url(),
-            auth_token: String::new(),
-            tenant_id: default_memory_tenant_id(),
-            default_entity_id: default_memory_entity_id(),
-            process_id: default_memory_process_id(),
-            recall_timeout_ms: default_recall_timeout_ms(),
-            recall_top_k: default_recall_top_k(),
-            recall_min_score: default_recall_min_score(),
-            ingest_batch_turns: default_ingest_batch_turns(),
-            ingest_timeout_ms: default_ingest_timeout_ms(),
-            ingest_max_retries: default_ingest_max_retries(),
-        }
-    }
+const fn default_memory_embedding_timeout_ms() -> u64 {
+    5000
 }
 
-fn default_memory_service_url() -> String {
-    "http://memory-service:8080".to_string()
+fn default_memory_sqlite_path() -> String {
+    "~/.zerda/memory/ema.sqlite3".to_string()
 }
-fn default_memory_tenant_id() -> String {
-    "default".to_string()
-}
-fn default_memory_entity_id() -> String {
-    "user_default".to_string()
-}
-fn default_memory_process_id() -> String {
-    "planner".to_string()
-}
-fn default_docs_search_embedding_model() -> String {
-    "openai@text-embedding-3-small".to_string()
-}
-const fn default_docs_search_embedding_dim() -> u64 {
-    1536
-}
-fn default_reflection_qdrant_url() -> String {
-    "http://qdrant:6333".to_string()
-}
-fn default_docs_search_qdrant_url() -> String {
-    "http://qdrant:6333".to_string()
-}
-fn default_docs_search_collection() -> String {
-    "zerda_docs_index".to_string()
-}
-fn default_docs_search_docs_dir() -> String {
-    "docs/zerda".to_string()
-}
-const fn default_recall_timeout_ms() -> u64 {
-    3000
-}
-const fn default_recall_top_k() -> u32 {
-    8
-}
-const fn default_recall_min_score() -> f64 {
-    0.6
-}
-const fn default_ingest_batch_turns() -> u32 {
-    3
-}
-const fn default_ingest_timeout_ms() -> u64 {
-    10000
-}
-const fn default_ingest_max_retries() -> u32 {
-    2
+
+fn default_memory_chroma_url() -> String {
+    "http://127.0.0.1:8000".to_string()
 }
 
 fn substitute_env_vars(input: &str) -> String {
@@ -502,31 +346,8 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
     let toml_value: toml::Value =
         toml::from_str(&substituted).context("Failed to parse TOML config")?;
     let json_value = toml_to_json(toml_value);
-    let mut config: Config =
+    let config: Config =
         serde_json::from_value(json_value).context("Failed to deserialize config")?;
-
-    let mcp_path = config_path.with_file_name("mcp.toml");
-    if mcp_path.exists() {
-        let mcp_raw = std::fs::read_to_string(&mcp_path)
-            .with_context(|| format!("Failed to read MCP config: {}", mcp_path.display()))?;
-        let mcp_substituted = substitute_env_vars(&mcp_raw);
-        let mcp_toml: toml::Value = toml::from_str(&mcp_substituted)
-            .with_context(|| format!("Failed to parse {}", mcp_path.display()))?;
-        let mcp_json = toml_to_json(mcp_toml);
-        let mcp_file: McpFile = serde_json::from_value(mcp_json)
-            .with_context(|| format!("Failed to deserialize {}", mcp_path.display()))?;
-        config.mcp.extend(mcp_file.mcp);
-    }
-
-    if config.agent.max_iterations < MIN_MAX_ITERATIONS {
-        tracing::warn!(
-            "agent.max_iterations={} is below minimum {}; using {}",
-            config.agent.max_iterations,
-            MIN_MAX_ITERATIONS,
-            MIN_MAX_ITERATIONS
-        );
-        config.agent.max_iterations = MIN_MAX_ITERATIONS;
-    }
 
     validate_config(&config)?;
 
@@ -566,11 +387,6 @@ fn validate_config(config: &Config) -> Result<()> {
 
     let provider_ids: std::collections::HashSet<&str> =
         config.providers.iter().map(|p| p.id.as_str()).collect();
-    let providers_by_id: std::collections::HashMap<&str, &ProviderEndpoint> = config
-        .providers
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
 
     let primary =
         ModelRef::parse(&config.agent.primary_model.model).context("agent.primary_model.model")?;
@@ -591,105 +407,6 @@ fn validate_config(config: &Config) -> Result<()> {
         validate_model_config(fm, "agent.fast_model")?;
     }
 
-    if config.reflection.enabled {
-        anyhow::ensure!(
-            config.reflection.as_model_config().is_some(),
-            "reflection.enabled=true requires non-empty reflection.llm_model (provider_id@model_name)"
-        );
-        anyhow::ensure!(
-            !config.reflection.qdrant_url.trim().is_empty(),
-            "reflection.qdrant_url must not be empty when reflection.enabled=true"
-        );
-    }
-
-    if config.docs_search.enabled {
-        anyhow::ensure!(
-            !config.docs_search.qdrant_url.trim().is_empty(),
-            "docs_search.qdrant_url must not be empty when docs_search.enabled=true"
-        );
-        anyhow::ensure!(
-            !config.docs_search.collection.trim().is_empty(),
-            "docs_search.collection must not be empty when docs_search.enabled=true"
-        );
-        anyhow::ensure!(
-            !config.docs_search.docs_dir.trim().is_empty(),
-            "docs_search.docs_dir must not be empty when docs_search.enabled=true"
-        );
-        anyhow::ensure!(
-            config.docs_search.embedding_dim > 0,
-            "docs_search.embedding_dim must be greater than 0"
-        );
-
-        let docs_embedding_ref = ModelRef::parse(&config.docs_search.embedding_model)
-            .context("docs_search.embedding_model (expected provider_id@model_name)")?;
-        anyhow::ensure!(
-            provider_ids.contains(docs_embedding_ref.provider_id.as_str()),
-            "docs_search.embedding_model references unknown provider '{}'",
-            docs_embedding_ref.provider_id
-        );
-        if let Some(provider) = providers_by_id.get(docs_embedding_ref.provider_id.as_str()) {
-            anyhow::ensure!(
-                supports_openai_embeddings(&provider.kind),
-                "docs_search.embedding_model provider '{}' uses unsupported type '{}' for embeddings; expected openai_chat or openai_responses",
-                provider.id,
-                provider.kind
-            );
-            anyhow::ensure!(
-                !provider.api_key.trim().is_empty(),
-                "docs_search.embedding_model provider '{}' api_key must not be empty",
-                provider.id
-            );
-        }
-    }
-
-    if let Some(reflection_model) = config.reflection.as_model_config() {
-        let reflection_ref =
-            ModelRef::parse(&reflection_model.model).context("reflection.llm_model")?;
-        anyhow::ensure!(
-            provider_ids.contains(reflection_ref.provider_id.as_str()),
-            "reflection.llm_model references unknown provider '{}'",
-            reflection_ref.provider_id
-        );
-        validate_model_config(&reflection_model, "reflection.llm_model")?;
-    }
-
-    if config.reflection.enabled {
-        if let Some(ref embedding_model) = config.reflection.embedding_model {
-            let embedding_ref = ModelRef::parse(embedding_model)
-                .context("reflection.embedding_model (expected provider_id@model_name)")?;
-            anyhow::ensure!(
-                provider_ids.contains(embedding_ref.provider_id.as_str()),
-                "reflection.embedding_model references unknown provider '{}'",
-                embedding_ref.provider_id
-            );
-            if let Some(provider) = providers_by_id.get(embedding_ref.provider_id.as_str()) {
-                anyhow::ensure!(
-                    supports_openai_embeddings(&provider.kind),
-                    "reflection.embedding_model provider '{}' uses unsupported type '{}' for embeddings; expected openai_chat or openai_responses",
-                    provider.id,
-                    provider.kind
-                );
-            }
-        } else if let Some(reflection_model) = config.reflection.as_model_config() {
-            let reflection_ref = ModelRef::parse(&reflection_model.model)
-                .context("reflection.llm_model (for default embedding provider)")?;
-            if let Some(provider) = providers_by_id.get(reflection_ref.provider_id.as_str()) {
-                anyhow::ensure!(
-                    supports_openai_embeddings(&provider.kind),
-                    "reflection.llm_model provider '{}' uses unsupported type '{}' for default embeddings; configure reflection.embedding_model with an OpenAI-compatible provider",
-                    provider.id,
-                    provider.kind
-                );
-            }
-        }
-    }
-
-    anyhow::ensure!(
-        config.agent.max_iterations >= MIN_MAX_ITERATIONS,
-        "max_iterations must be greater than or equal to {}",
-        MIN_MAX_ITERATIONS
-    );
-
     for ch in &config.channels {
         if ch.name == "telegram" {
             let has_token = ch
@@ -708,71 +425,29 @@ fn validate_config(config: &Config) -> Result<()> {
         );
     }
 
-    validate_mcp_servers(&config.mcp)?;
-
-    Ok(())
-}
-
-fn supports_openai_embeddings(provider_type: &str) -> bool {
-    matches!(provider_type, "openai_chat" | "openai_responses")
-}
-
-fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<()> {
-    for server in servers {
-        anyhow::ensure!(!server.name.trim().is_empty(), "mcp.name must not be empty");
+    if config.memory.enabled {
         anyhow::ensure!(
-            !server.transport.trim().is_empty(),
-            "mcp.{}.transport must not be empty",
-            server.name
+            !config.memory.embedding.base_url.trim().is_empty(),
+            "memory.embedding.base_url must not be empty when memory.enabled = true"
         );
-
-        match server.transport.as_str() {
-            "stdio" => {
-                anyhow::ensure!(
-                    server
-                        .command
-                        .as_deref()
-                        .is_some_and(|s| !s.trim().is_empty()),
-                    "mcp.{} with stdio transport requires non-empty command",
-                    server.name
-                );
-                anyhow::ensure!(
-                    server.url.is_none() || server.url.as_deref().is_some_and(|u| u.is_empty()),
-                    "mcp.{} with stdio transport must not set url",
-                    server.name
-                );
-            }
-            "streamable-http" => {
-                anyhow::ensure!(
-                    server.url.as_deref().is_some_and(|s| !s.trim().is_empty()),
-                    "mcp.{} with streamable-http transport requires non-empty url",
-                    server.name
-                );
-            }
-            other => {
-                anyhow::bail!(
-                    "mcp.{} transport '{}' is unsupported; expected 'stdio' or 'streamable-http'",
-                    server.name,
-                    other
-                );
-            }
-        }
-
-        for arg in &server.args {
-            anyhow::ensure!(
-                !arg.is_empty(),
-                "mcp.{} args must not contain empty items",
-                server.name
-            );
-        }
-        for key in server.env.keys() {
-            anyhow::ensure!(
-                !key.trim().is_empty(),
-                "mcp.{} env keys must not be empty",
-                server.name
-            );
-        }
+        anyhow::ensure!(
+            !config.memory.embedding.model.trim().is_empty(),
+            "memory.embedding.model must not be empty when memory.enabled = true"
+        );
+        anyhow::ensure!(
+            config.memory.embedding.dimensions > 0,
+            "memory.embedding.dimensions must be greater than 0 when memory.enabled = true"
+        );
+        anyhow::ensure!(
+            !config.memory.sqlite.path.trim().is_empty(),
+            "memory.sqlite.path must not be empty when memory.enabled = true"
+        );
+        anyhow::ensure!(
+            !config.memory.chroma.url.trim().is_empty(),
+            "memory.chroma.url must not be empty when memory.enabled = true"
+        );
     }
+
     Ok(())
 }
 
@@ -809,5 +484,98 @@ fn toml_to_json(value: toml::Value) -> serde_json::Value {
             let map = tbl.into_iter().map(|(k, v)| (k, toml_to_json(v))).collect();
             serde_json::Value::Object(map)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let unique = format!("{}-{}.toml", name, uuid::Uuid::new_v4());
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn loads_memory_config_with_embedding_and_chroma() {
+        let path = temp_config_path("zerda-memory-config");
+        std::fs::write(
+            &path,
+            r#"
+[providers.openai]
+type = "openai_chat"
+api_key = "test-key"
+
+[agent.primary_model]
+model = "openai@gpt-4o"
+
+[memory]
+enabled = true
+
+[memory.embedding]
+base_url = "https://embed.example.com/v1"
+api_key = "embed-key"
+model = "text-embedding-custom"
+dimensions = 1024
+
+[memory.sqlite]
+path = "/tmp/ema.sqlite3"
+
+[memory.chroma]
+url = "http://127.0.0.1:8000"
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(Some(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(loaded.memory.enabled);
+        assert_eq!(
+            loaded.memory.embedding.base_url,
+            "https://embed.example.com/v1"
+        );
+        assert_eq!(loaded.memory.embedding.model, "text-embedding-custom");
+        assert_eq!(loaded.memory.embedding.dimensions, 1024);
+        assert_eq!(loaded.memory.sqlite.path, "/tmp/ema.sqlite3");
+        assert_eq!(loaded.memory.chroma.url, "http://127.0.0.1:8000");
+    }
+
+    #[test]
+    fn rejects_memory_config_without_embedding_dimensions() {
+        let path = temp_config_path("zerda-memory-config-invalid");
+        std::fs::write(
+            &path,
+            r#"
+[providers.openai]
+type = "openai_chat"
+api_key = "test-key"
+
+[agent.primary_model]
+model = "openai@gpt-4o"
+
+[memory]
+enabled = true
+
+[memory.embedding]
+base_url = "https://embed.example.com/v1"
+model = "text-embedding-custom"
+dimensions = 0
+
+[memory.sqlite]
+path = "/tmp/ema.sqlite3"
+
+[memory.chroma]
+url = "http://127.0.0.1:8000"
+"#,
+        )
+        .unwrap();
+
+        let err = load_config(Some(&path)).unwrap_err();
+        std::fs::remove_file(&path).ok();
+
+        assert!(err
+            .to_string()
+            .contains("memory.embedding.dimensions must be greater than 0"));
     }
 }

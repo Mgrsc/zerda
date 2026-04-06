@@ -9,6 +9,14 @@ use tokio::sync::mpsc;
 
 pub mod cli;
 pub mod telegram;
+pub mod wechat;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMessageOrigin {
+    Human,
+    RuntimePtcResult,
+    RuntimePtcNotice,
+}
 
 #[derive(Debug, Clone)]
 pub struct ChannelMessage {
@@ -17,6 +25,8 @@ pub struct ChannelMessage {
     pub content: String,
     pub content_parts: Option<Vec<ContentPart>>,
     pub channel: String,
+    pub origin: ChannelMessageOrigin,
+    pub related_job_id: Option<String>,
 }
 
 #[async_trait]
@@ -46,10 +56,16 @@ pub trait Channel: Send + Sync {
 type ChannelFactory =
     fn(&crate::config::ChannelConfig, Option<Arc<dyn SttProvider>>) -> Result<Arc<dyn Channel>>;
 
-const REGISTRY: &[(&str, ChannelFactory)] = &[("telegram", |config, stt| {
-    let tg = telegram::TelegramChannel::from_config(&config.params, stt)?;
-    Ok(Arc::new(tg))
-})];
+const REGISTRY: &[(&str, ChannelFactory)] = &[
+    ("telegram", |config, stt| {
+        let tg = telegram::TelegramChannel::from_config(&config.params, stt)?;
+        Ok(Arc::new(tg))
+    }),
+    ("wechat", |config, stt| {
+        let wechat = wechat::WechatChannel::from_config(&config.params, stt)?;
+        Ok(Arc::new(wechat))
+    }),
+];
 
 pub fn create_channel(
     config: &crate::config::ChannelConfig,
@@ -78,4 +94,15 @@ pub fn create_channel_registry(
         }
     }
     registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REGISTRY;
+
+    #[test]
+    fn registry_lists_supported_remote_channels() {
+        let names = REGISTRY.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        assert_eq!(names, vec!["telegram", "wechat"]);
+    }
 }

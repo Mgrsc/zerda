@@ -1,27 +1,38 @@
 # zerda full configuration template
-# Unless explicitly marked as "required", every concrete value below is the runtime default in src/config.rs.
-# ${VAR} placeholders are examples and are NOT defaults.
-# mcp servers can be defined here with [[mcp]], or in a separate mcp.toml (both are merged).
+# This template reflects the current runtime:
+# - one assistant dialogue loop
+# - async Python-based PTC jobs
+# - no provider-level tools
 
 # =============================
 # Providers (at least one required)
+# Each `[providers.<id>]` block defines one provider instance.
+# `<id>` is your provider identifier and is referenced by models as `provider_id@model_name`.
 # =============================
-# [providers.<id>] defines an endpoint.
-# <id> is referenced by model fields: <provider_id>@<model_name>.
-
 [providers.openai]
-type = "openai_chat"                    # required; supported: openai_chat | openai_responses | anthropic
-api_key = "${OPENAI_API_KEY}"           # required
-base_url = ""                           # default: provider-specific official endpoint
+# Provider adapter kind.
+# Options: `openai_chat` | `openai_responses` | `anthropic`
+type = "openai_chat"
+# Provider API key. Required for real requests.
+api_key = "${OPENAI_API_KEY}"
+# Optional base URL override. Leave empty to use the provider default endpoint.
+base_url = ""
 
 [providers.openai.retry]
+# Maximum number of retry attempts after the first failed request.
 max_retries = 3
+# Initial retry backoff in milliseconds.
 base_delay_ms = 2000
+# Maximum retry backoff in milliseconds.
 max_delay_ms = 30000
+# TCP connect timeout in seconds.
 connect_timeout_secs = 10
+# Full request timeout in seconds.
 request_timeout_secs = 120
 
-# [providers.openai.extra_headers]      # default: empty
+# [providers.openai.extra_headers]
+# Optional custom HTTP headers sent to the provider.
+# Use this only when your proxy or provider requires extra routing or auth headers.
 # "HTTP-Referer" = "https://example.com"
 # "X-Title" = "zerda"
 
@@ -29,109 +40,135 @@ request_timeout_secs = 120
 # Agent
 # =============================
 [agent]
-max_iterations = 10
+# Max retained conversation turns before compaction is more likely to happen.
 max_history = 30
-max_tool_output_chars = 30000
+# Path to the identity/system prompt file loaded at startup.
 identity_path = "~/.zerda/identity.md"
-show_usage = false
-# max_budget_tokens = 1000000           # optional; default: unlimited (unset)
+# Delete session files older than this many days.
 session_cleanup_days = 7
+# Per PTC job timeout in seconds.
 tool_timeout = 300
+# Primitive blacklist.
+# Example values depend on the installed primitives, e.g. ["shell", "process_spawn"].
+# Use `[]` to keep everything enabled.
 disabled_primitives = []
 
 [agent.primary_model]
-model = "openai@${OPENAI_MODEL}"        # required
+# Main model used for user-facing turns.
+# Format: `provider_id@model_name`
+# `provider_id` must match a `[providers.<id>]` block above.
+model = "openai@${OPENAI_MODEL}"
+# Whether this model should receive image input when the channel supports it.
 vision = true
-# temperature = 1.0                     # optional; default: unset
-# top_p = 1.0                           # optional; default: unset
-# max_tokens = 4096                     # optional; default: unset
-
-# [agent.fast_model]                    # optional; default: fall back to primary_model
-# model = "openai@gpt-5.3"
-# vision = false
+# Optional sampling temperature. Lower is more deterministic.
 # temperature = 1.0
+# Optional nucleus sampling parameter. Usually set either this or `temperature`.
 # top_p = 1.0
+# Optional maximum output tokens. Provider-specific limits still apply.
+# max_tokens = 4096
+
+[agent.fast_model]
+# Optional sidecar model used for compaction/compression and similar internal tasks.
+# Format: `provider_id@model_name`
+model = "openai@${OPENAI_FAST_MODEL}"
+# Whether the fast model can accept image input.
+vision = true
+# Optional sampling temperature.
+# temperature = 1.0
+# Optional nucleus sampling parameter.
+# top_p = 1.0
+# Optional maximum output tokens.
 # max_tokens = 4096
 
 # =============================
-# Reflection
-# =============================
-[reflection]
-enabled = true
-llm_model = ""                          # default: empty; required only when enabled = true
-max_tokens = 2048
-# embedding_model = "openai@text-embedding-3-small"  # optional; default: "<llm provider>@text-embedding-3-small" when enabled
-# embedding_dim = 1536                  # optional; model-specific
-qdrant_url = "http://qdrant:6334"
-qdrant_api_key = ""
-
-# =============================
-# Docs Search (optional)
-# =============================
-[docs_search]
-enabled = true
-embedding_model = "openai@text-embedding-3-small"
-embedding_dim = 1536
-qdrant_url = "http://qdrant:6334"
-qdrant_api_key = ""
-collection = "zerda_docs_index"
-docs_dir = "docs/zerda"
-
-# =============================
-# Channels (optional)
+# Channels
 # =============================
 # [[channels]]
-# name = "telegram"                     # currently only telegram is supported
-# token = "${TELEGRAM_BOT_TOKEN}"       # required when telegram channel is enabled
-# allowed_users = []                    # default: [] (empty means allow all users)
+# Channel kind.
+# Options: `telegram` | `wechat`
+# name = "telegram"
+# Telegram bot token.
+# token = "${TELEGRAM_BOT_TOKEN}"
+# Telegram allowlist.
+# Options:
+# - `[]`: allow all users
+# - `["*"]`: allow all users
+# - `["123456789"]`: allow only specific Telegram user IDs
+# allowed_users = []
+# Max length of one Telegram message chunk before splitting.
 # max_message_length = 4096
+# Draft streaming update interval in milliseconds.
+# Lower values feel faster but create more edit traffic.
 # draft_stream_update_interval_ms = 350
 
-# =============================
-# MCP servers (optional)
-# =============================
-# [[mcp]]
-# name = "my_mcp"
-# transport = "stdio"                   # stdio | streamable-http
-# command = "npx"                       # required when transport = "stdio"
-# args = ["-y", "my-mcp-server"]
-# url = "https://example.com/mcp"       # required when transport = "streamable-http"
-# [mcp.env]
-# EXAMPLE_KEY = "value"
+# [[channels]]
+# Channel kind.
+# Options: `telegram` | `wechat`
+# name = "wechat"
+# Base URL of the external WeChat gateway service.
+# gateway_url = "http://wechat-agent-gateway:8080"
 
 # =============================
-# TTS / STT (optional)
+# STT (optional)
 # =============================
-[tts]
-provider = ""                           # default: disabled; supported value when enabled: "minimax"
-# api_key = "${MINIMAX_API_KEY}"        # required when provider = "minimax"
-model = "speech-2.8-hd"
-# voice_id = "female-shaonv"            # optional; default: unset
-
 [stt]
-provider = ""                           # default: disabled; supported value when enabled: "groq"
-# api_key = "${GROQ_API_KEY}"           # required when provider = "groq"
+# Speech-to-text provider.
+# Options:
+# - `""`: disable STT
+# - `"groq"`: enable Groq transcription
+provider = ""
+# STT API key. Required when `provider = "groq"`.
+# api_key = "${GROQ_API_KEY}"
+# STT model name used by the selected provider.
 model = "whisper-large-v3-turbo"
 
 # =============================
-# Memory Service (optional)
+# Memory (EMA recall + async maintenance)
 # =============================
-[memory_service]
+[memory]
+# Enable EMA memory recall and async maintenance.
 enabled = true
-url = "http://memory-service:8080"
-auth_token = ""
-tenant_id = "default"
-default_entity_id = "user_default"
-process_id = "planner"
-recall_timeout_ms = 3000
-recall_top_k = 8
-recall_min_score = 0.6
-ingest_batch_turns = 3
-ingest_timeout_ms = 10000
-ingest_max_retries = 2
+
+[memory.embedding]
+# OpenAI-compatible embedding endpoint used by EMA.
+# In the bundled Compose stack, the repository `zerda.toml` reuses the same OpenAI base URL/key
+# and points Chroma to `http://chroma:8000`.
+base_url = "${OPENAI_BASE_URL}"
+# API key for the embedding endpoint.
+# Change this if you use a separate embedding service.
+api_key = "${OPENAI_API_KEY}"
+# Embedding model name.
+model = "text-embedding-3-small"
+# Embedding vector dimensions expected from the endpoint.
+dimensions = 1536
+# Embedding request timeout in milliseconds.
+timeout_ms = 5000
+
+[memory.sqlite]
+# SQLite path used for EMA state and journal.
+path = "~/.zerda/memory/ema.sqlite3"
+
+[memory.chroma]
+# Chroma base URL used for the active vector index.
+# Bare-metal default: `http://127.0.0.1:8000`
+# Bundled Compose: `http://chroma:8000`
+url = "http://127.0.0.1:8000"
 
 # =============================
 # Logging
 # =============================
 [log]
+# Log level.
+# Common options: `trace` | `debug` | `info` | `warn` | `error`
 level = "info"
+# Log output format.
+# Options: `json` | `text`
+format = "json"
+# When true, log bodies and previews are less redacted and easier to inspect locally.
+# Be careful with secrets and sensitive user content.
+debug_plaintext = false
+# Minimum interval for streaming progress logs in milliseconds.
+# Values lower than 200 are clamped to 200 by the runtime.
+stream_progress_interval_ms = 2000
+# Include the Rust log target/module path in output.
+include_target = true
