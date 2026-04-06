@@ -57,13 +57,17 @@ Generate the full config template if needed:
 
 ## How do I configure it?
 
-Load environment variables before starting Zerda:
+Zerda expands `${VAR}` placeholders in `zerda.toml` from the process environment.
+
+In practice, keep secrets in `.env` and load that file before starting:
 
 ```bash
 set -a
 source ~/.zerda/.env
 set +a
 ```
+
+If you use Docker Compose, `.env` is loaded automatically.
 
 Minimal runtime config:
 
@@ -114,19 +118,13 @@ name = "wechat"
 gateway_url = "http://127.0.0.1:8080"
 ```
 
-If Zerda and `wechat-agent-gateway` run in the same Docker Compose stack, use:
+If Zerda and `wechat-agent-gateway` run in the same Docker Compose stack, use the service name instead of `127.0.0.1`:
 
 ```toml
 [[channels]]
 name = "wechat"
 gateway_url = "http://wechat-agent-gateway:8080"
 ```
-
-Bundled Compose config:
-
-- The repository `zerda.toml` is the Compose-ready config.
-- It enables EMA memory by default.
-- It points Chroma to `http://chroma:8000`.
 
 Optional settings:
 
@@ -137,54 +135,15 @@ ZERDA_PRIMITIVES_ROOT=/absolute/path/to/code_primitives/python
 
 Notes:
 
-- `agent.tool_timeout` is the timeout for one background PTC job.
-- `memory` enables EMA memory: hot-path recall uses embeddings plus local reranking, while completed turns are buffered before asynchronous extraction and consolidation with the fast model.
-- The maintained default embedding path reuses `OPENAI_API_KEY` and `OPENAI_BASE_URL`; switch `memory.embedding.api_key` only if embeddings should use a separate provider credential.
-- EMA keeps both personal memory and operational memory. Personal durable memory stores events, commitments, preferences, profile facts, and constraints backed by exact user-authored quotes; operational durable memory stores reusable procedures and failure patterns only when backed by exact assistant/runtime evidence from a completed turn.
-- Ordinary EMA recall prioritizes profile facts, commitments, preferences, constraints, events, and insights; troubleshooting queries additionally prioritize failure patterns and procedures.
-- Personal durable memory does not store procedures, and operational maintenance can consolidate repeated procedures or failure patterns into higher-level operational insights.
-- Failure patterns are recalled only for troubleshooting-style queries, not for ordinary memory prompts.
-- Low-value active memories that stay unused for long enough can be archived automatically, while frequently reused memories decay more slowly.
-- EMA currently uses one global single-user memory entity, so all sessions share the same long-term memory space.
-- `agent.disabled_primitives` disables named Python primitives such as `shell` or `process_spawn`.
-- Core primitives ship under `code_primitives/python/primitives/`.
-- `code_primitives/python/primitives/catalog.py` is the registration point for exposed built-in primitives.
-- All non-core primitives live under `custom_primitives/`.
-- `custom_primitives/catalog.py` is the registration point for exposed custom primitives, and implementations may be grouped under subdirectories such as `custom_primitives/agent_browser/` and `custom_primitives/firecrawl/`.
-- In the bundled Compose deployment, mount that directory into `/root/.zerda/` because runtime discovery resolves it relative to Zerda's working directory.
-- The first system prompt block is `<PTC_AVALIABLE_PRIMITIVES>`, generated dynamically at startup from the currently enabled top-level public primitive names.
-- That block includes both core and custom public names such as `fs_read`, `process_run`, `firecrawl_search_web`, `scrapling_fetch_page`, and `agent_browser`.
-- The intended web split is: Firecrawl for search and URL discovery, Scrapling for page fetching, and `agent_browser` for interactive validation and testing.
-- `scrapling_fetch_page` automatically routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body extraction and light UI-noise filtering are applied before returning text.
-- For selected dynamic-content domains such as Reddit, Zhihu, and Juejin, `scrapling_fetch_page` now tries static fetch first and automatically retries with stealth fetch when the static result looks like a shell page or lacks usable content.
-- `scrapling_fetch_page` requires the Python runtime to have `scrapling[fetchers]`. Without it, the primitive returns `dependency_missing`.
-- `scrapling_fetch_page` may internally use a stealth browser-backed path for selected dynamic domains and therefore also needs Playwright browser binaries when that internal fallback path is required.
-- Prompt-visible primitive names are resolved from the same primitive root settings used by PTC job bootstrap, so startup discovery and runtime availability stay aligned.
-- The built-in `shell` primitive uses `command=` as its primary argument and also accepts the common alias `cmd=` for compatibility.
-- The model is expected to inspect `<PTC_AVALIABLE_PRIMITIVES>` first, then call `help("name")` whenever callable shape, method list, or parameter meaning is unclear.
-- PTC primitives can also expose progressive guidance through `get_workflow`, which is intended for whole-tool setup and operational flow rather than raw parameter discovery.
-- For setup-sensitive or multi-step tasks, the assistant should inspect `get_workflow` before operational code and then execute the workflow step by step rather than writing one large dependent script.
-- Generic execution guidance should stay tool-agnostic: later steps should only run after earlier steps have succeeded and produced the state or identifiers they depend on.
-- `agent_browser` is the bundled browser namespace. Public PTC usage should prefer methods such as `agent_browser.connect_cdp(...)`, `agent_browser.snapshot()`, and `agent_browser.get_title()`.
-- `agent_browser.get_workflow()` is optional but recommended when browser setup may be missing. It returns a standalone Markdown workflow that includes installation and the loop of CDP attachment, snapshot, interaction, wait, re-snapshot, and data reads.
-- `agent_browser` now keeps a default browser session per Zerda conversation after a successful `connect_cdp`, so later browser actions can reuse the same attached browser even when the model omits `session`.
-- Browser-specific invalid-argument responses may now include corrective data such as allowed `kind` values, missing required parameters, and example calls.
-- `agent_browser.close()` is explicit cleanup only and should not be treated as the default end of a browser task, because the connected browser often belongs to the user.
-- Browser screenshots written through `agent_browser` go into the current PTC artifact directory.
-- Python execution protocol now uses a single `<PTC_TOOL_CALLING>` block with direct body code instead of nesting `<PYTHON>` inside it.
-- PTC bodies already run inside the runtime event loop; they should use `await` directly and must not call `asyncio.run()`.
-- Every non-trivial PTC body should assign the final value to `result` explicitly so the runtime does not persist `null`.
-- The runtime accepts only the exact `<PTC_TOOL_CALLING>` tag for normal execution; malformed provider-style wrappers are treated as prompt errors rather than normalized.
-- When a PTC `out.json` payload exceeds 8,000 characters, Zerda asks `agent.fast_model` to compress the inline reinjected result using the original main-model request context; the full raw artifact remains on disk at the reported `OUT_PATH`.
-- The WeChat channel does not speak the WeChat protocol directly. It talks to [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway) over HTTP.
-- In the bundled Compose deployment, Zerda should reach the gateway by service name (`http://wechat-agent-gateway:8080`), not `127.0.0.1`.
-- Zerda treats each WeChat gateway instance as single-account. If the gateway contains multiple configured accounts, startup fails instead of choosing one implicitly.
-- When the WeChat channel starts and no persisted account exists, Zerda prints a terminal QR code in startup logs and waits for scan confirmation.
-- Empty WeChat poll responses keep the last pull cursor so older inbound messages are not replayed on the next poll.
-- WeChat reply chunking is now tuned to keep short and medium replies in one bubble when possible and avoid dangling endings such as `for example:`.
-- To avoid scanning again after each restart, run the gateway with a stable `WECHAT_GATEWAY_STATE_PATH` volume or host path. Zerda does not store WeChat login state itself.
-- WeChat voice messages use the transcript already returned by the gateway. Zerda's `[stt]` config is not required for WeChat voice input.
-- WeChat outbound image replies support the same rich marker format as Telegram: `<image>/absolute/path.png</image>`. Zerda uploads the local file to `wechat-agent-gateway` and sends it through `send_media`.
+- `zerda.toml` is the Compose-ready config in this repo. `zerda.toml.full` is the fuller template for custom or bare-metal deployments.
+- The maintained defaults reuse `OPENAI_API_KEY` and `OPENAI_BASE_URL` for embeddings, so most setups only need one `.env` file plus a matching TOML config.
+- `agent.tool_timeout` controls the timeout for one background PTC job.
+- EMA memory is enabled in the maintained configs and needs a reachable Chroma server.
+- `ZERDA_PRIMITIVES_ROOT` is only needed if you want to override the default primitive discovery path.
+- Custom primitives live under `custom_primitives/`; built-in ones live under `code_primitives/python/primitives/`.
+- WeChat uses [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway), not the WeChat protocol directly.
+- To avoid rescanning the QR code after restart, persist the gateway state with `WECHAT_GATEWAY_STATE_PATH`.
+- WeChat voice input uses the transcript returned by the gateway; Zerda's `[stt]` config is not required for that path.
 
 ## How do I run it?
 

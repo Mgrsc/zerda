@@ -121,44 +121,10 @@ Zerda 启动时按以下顺序确定配置文件：
 ### 🔑 环境变量
 Zerda 会从进程环境变量中展开 TOML 内的 `${VAR}` 占位符。
 
-- Docker 模式：`docker compose` 通过 `env_file` 自动加载 `.env`。
-- 手动启动：Zerda 不会自动读取 `.env`，需要先在 shell 中加载。
-- 仓库内的 `docker-compose.yml` 只使用一份 `.env`，供 Zerda 自身与同栈部署的 gateway 使用。
-- 仓库维护的默认 embedding 配置会直接复用 `OPENAI_API_KEY` 与 `OPENAI_BASE_URL`；只有当 embedding 要走单独的兼容端点或不同凭据时，才需要手工改 `memory.embedding.api_key`。
-- 核心原语位于 `code_primitives/python/primitives/`。
-- `code_primitives/python/primitives/catalog.py` 是内置原语的注册入口。
-- 所有非核心原语统一位于 `custom_primitives/`。
-- `custom_primitives/catalog.py` 是自定义原语的注册入口；具体实现可以按能力分组放在 `custom_primitives/agent_browser/`、`custom_primitives/firecrawl/` 这类子目录里。
-- 仓库自带的 Compose 部署里，这个目录要挂到容器内的 `/root/.zerda/`，因为运行时会按 Zerda 当前工作目录去发现它。
-- 最前面的 system 提示词块会动态注入 `<PTC_AVALIABLE_PRIMITIVES>`，里面只列当前启用的顶层公开原语名。
-- 这个列表同时包含内置原语和自定义原语，比如 `fs_read`、`process_run`、`firecrawl_search_web`、`scrapling_fetch_page`、`agent_browser`。
-- 当前网页能力分工是：Firecrawl 负责搜索和发现 URL，Scrapling 负责页面抓取，`agent_browser` 负责交互式验证与测试。
-- `scrapling_fetch_page` 遇到 `mp.weixin.qq.com` 文章链接时会自动切到微信公众号专用提取；遇到 `x.com` / `twitter.com` 时会自动切到 stealth 抓取路径，并优先提取 tweet 正文容器，再做一层轻量 UI 噪音过滤。
-- 对 Reddit、知乎、掘金这类已知动态站点，`scrapling_fetch_page` 现在会先走静态抓取；如果静态结果明显像壳页或正文不足，会自动再尝试一次 stealth 抓取。
-- `scrapling_fetch_page` 依赖 Python 运行时已安装 `scrapling[fetchers]`；如果没装，这个原语会返回 `dependency_missing`。
-- `scrapling_fetch_page` 在部分动态站点上会内部切到 stealth 浏览器抓取，因此当这条内部路径被需要时，也依赖 Playwright 浏览器二进制。
-
-仓库内 Docker 镜像说明：
-
-- 当前仓库里的 `Dockerfile` 会在镜像内创建专用 Python 虚拟环境，并安装 `scrapling[fetchers]`、`playwright` 和 Chromium 浏览器，因此本地 build 出来的镜像可以直接使用 Scrapling 抓取原语，不需要再进容器手工安装。
-- prompt 里可见的原语名会和 PTC 作业 bootstrap 使用同一套 primitive roots 解析规则，尽量保证“启动时看到的”和“运行时实际可用的”一致。
-- 内置 `shell` 原语的新代码推荐用 `command=`，同时也兼容模型常见会写的 `cmd=` 别名。
-- 模型应先查看 `<PTC_AVALIABLE_PRIMITIVES>`，如果不清楚某个原语或命名空间怎么调用，再用 `help("name")` 查看方法、参数、默认值和返回约定。
-- 原语发现现在主要依赖清晰的公开名字，加上 `help(...)` 的结构化说明，而不是把大段签名直接塞进首屏提示词。
-- PTC 原语除了执行能力，也可以通过 `get_workflow` 暴露渐进式工作流说明，用来指导安装、初始化和推荐的整体操作顺序。
-- 对安装敏感、依赖连接或状态复用、或包含三步以上依赖关系的任务，模型应先看 `get_workflow`，再按步骤逐段执行，而不是一口气写一大段依赖脚本。
-- 通用执行规则应保持与具体工具无关：后续步骤只能建立在前一步已经成功且产出了所需状态、标识符或句柄的前提上。
-- 仓库内置的浏览器能力对外公开为 `agent_browser` 命名空间，常规调用应优先写成 `agent_browser.connect_cdp(...)`、`agent_browser.snapshot()`、`agent_browser.get_title()` 这类方法。
-- 当浏览器能力可能还没安装或流程不熟时，可以先看 `agent_browser.get_workflow()`；它会返回一份独立维护的 Markdown workflow，描述安装步骤以及 `connect_cdp -> snapshot -> interaction -> wait -> re-snapshot -> read` 的循环流程。
-- `connect_cdp` 成功后，`agent_browser` 会按 Zerda 会话保存一个默认浏览器 session，后续浏览器动作即使没显式传 `session` 也会优先复用同一个已连接浏览器。
-- 浏览器相关的参数错误现在可能带有纠错数据，比如允许的 `kind` 取值、缺失的必填参数和示例调用。
-- `agent_browser.close()` 只是显式清理动作，不应被当成默认收尾，因为连上的浏览器通常是用户自己打开的。
-- 通过 `agent_browser` 生成的浏览器截图会写入当前 PTC 作业的 artifact 目录。
-- Python 执行协议已收敛为单个 `<PTC_TOOL_CALLING>` 块，代码直接放在 body 里，不再额外嵌套 `<PYTHON>` 包装层。
-- PTC body 本身已经运行在 runtime 的事件循环里，应该直接 `await`，不要再写 `asyncio.run()`。
-- 只要不是非常简单的一步调用，都应该显式给 `result` 赋值，避免 runtime 落盘 `null`。
-- 运行时用于常规执行时只接受精确的 `<PTC_TOOL_CALLING>` 标签；错误的 provider 风格包装会被当成提示词错误，而不会再做兼容归一化。
-- 当 PTC 的 `out.json` 结果超过 8,000 字符时，Zerda 会把“原始主模型请求上下文 + PTC 结果”交给 `agent.fast_model` 进行压缩后再回注；完整原始结果仍保留在回注消息里的 `OUT_PATH` 所指向工件中。
+- Docker 模式：`docker compose` 会自动加载 `.env`。
+- 手动启动：先把 `.env` 导入 shell，再启动 Zerda。
+- 一般只需要维护一份 `.env`，TOML 里直接引用 `${VAR}` 即可。
+- 仓库维护的默认 embedding 配置会直接复用 `OPENAI_API_KEY` 与 `OPENAI_BASE_URL`；只有当 embedding 要走单独端点或凭据时，才需要额外改动。
 
 ```bash
 set -a
@@ -180,7 +146,7 @@ name = "wechat"
 gateway_url = "http://127.0.0.1:8080"
 ```
 
-如果 Zerda 和 `wechat-agent-gateway` 跑在同一个 Docker Compose 栈里，应改成：
+如果 Zerda 和 `wechat-agent-gateway` 跑在同一个 Docker Compose 栈里，应改成服务名：
 
 ```toml
 [[channels]]
@@ -188,22 +154,16 @@ name = "wechat"
 gateway_url = "http://wechat-agent-gateway:8080"
 ```
 
-EMA memory 现在在仓库维护的配置里默认开启。
+补充说明：
 
-- 裸机运行时，`[memory.chroma].url` 应保持为 `http://127.0.0.1:8000`，并确保本机已有 Chroma。
-- 使用仓库自带 Compose 时，直接使用 `zerda.toml`，其中 `[memory.chroma].url` 已指向 `http://chroma:8000`。
-
-WeChat 接入说明：
-
-- Zerda 不直接实现微信协议，而是通过 [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway) 的 HTTP 接口接入。
-- 在仓库自带的 Compose 部署里，Zerda 访问 gateway 应使用服务名 `http://wechat-agent-gateway:8080`，不要写 `127.0.0.1`。
-- Zerda 把每个 WeChat gateway 实例都当成单账号入口处理；如果 gateway 里已经存在多个已配置账号，启动会直接报错，不会隐式挑一个。
-- 启用 WeChat 通道后，如果 gateway 里还没有可复用的登录账号，`zerda serve` 启动时会在日志里打印终端二维码并等待扫码确认。
-- WeChat 轮询在空结果时会保留上一次的拉取游标，避免下一轮把旧消息重新拉回来。
-- WeChat 回复切分现在会尽量让短中回复保持单气泡，并避免出现单独以“比如：”这类连接词结尾的气泡。
-- 想避免每次重启都重新扫码，必须给 gateway 配稳定的 `WECHAT_GATEWAY_STATE_PATH` 持久化目录；登录态保存在 gateway，不保存在 Zerda。
-- 微信语音消息直接使用 gateway 已返回的转写文本，不依赖 Zerda 的 `[stt]` 配置。
-- WeChat 出站图片现在支持和 Telegram 一样的富文本标记：`<image>/绝对路径.png</image>`。Zerda 会先把本地文件上传到 `wechat-agent-gateway`，再通过 `send_media` 发出去。
+- `zerda.toml` 是仓库内的 Compose 就绪配置，`zerda.toml.full` 适合裸机或自定义部署。
+- EMA memory 在仓库维护的配置里默认开启，需要可访问的 Chroma。
+- 裸机运行时通常使用 `http://127.0.0.1:8000`；仓库自带 Compose 则使用 `http://chroma:8000`。
+- `ZERDA_PRIMITIVES_ROOT` 只有在你要覆盖默认原语发现路径时才需要设置。
+- 内置原语位于 `code_primitives/python/primitives/`，自定义原语位于 `custom_primitives/`。
+- WeChat 通过 [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway) 接入，不直接处理微信协议。
+- 想避免重启后重新扫码，需要在 gateway 侧持久化 `WECHAT_GATEWAY_STATE_PATH`。
+- 微信语音直接使用 gateway 返回的转写文本，不依赖 Zerda 的 `[stt]` 配置。
 
 ---
 
