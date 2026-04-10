@@ -143,8 +143,8 @@ Prompt exposure policy:
 - Web routing is: `firecrawl_search_web` for URL discovery, `smart_search` for answer-style retrieval against a configured OpenAI-compatible `chat/completions` endpoint, Scrapling primitives for page fetching, and `agent_browser` for interactive validation and test flows.
 - `scrapling_fetch_page` routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body container extraction is preferred over full-page text.
 - `scrapling_fetch_page` also performs one automatic static-to-stealth retry for selected dynamic-content domains when the static result looks like a shell page or lacks usable body text.
-- `scrapling_fetch_page` depends on `scrapling[fetchers]` being installed in the Python runtime; otherwise it returns `dependency_missing`.
-- `scrapling_fetch_page` may internally switch to a stealth browser-backed path for selected dynamic domains; when that internal path is required, Playwright browser binaries must also be present.
+- `scrapling_fetch_page` depends on `scrapling[fetchers]` and `playwright` in the custom-primitives Python runtime; otherwise it returns `dependency_missing`.
+- `scrapling_fetch_page` may internally switch to a stealth browser-backed path for selected dynamic domains; `run_zerda_with_deps.sh` installs Chromium automatically when `playwright` is declared in custom primitive requirements.
 - Optional docstring metadata still helps indexing and maintenance, but primary discoverability no longer depends on a separate search-first flow.
 
 ## Configuration Reference
@@ -217,9 +217,9 @@ Repository-maintained config template:
 
 Runtime dependency note:
 
-- `scrapling_fetch_page` does not use an environment variable, but it does require `scrapling[fetchers]` in the Python runtime. If that dependency is absent, the primitive returns `dependency_missing`.
-- `scrapling_fetch_page` may also require Playwright browser binaries when its internal stealth path is used for selected dynamic domains.
-- The repository Dockerfile provisions a dedicated Python virtual environment and installs `scrapling[fetchers]`, `playwright`, and Chromium for locally built images, so bundled Scrapling primitives should be available inside that image unless the Dockerfile diverges again.
+- `scrapling_fetch_page` does not use an environment variable, but it does require `scrapling[fetchers]` and `playwright` in the custom-primitives Python runtime. If those dependencies are absent, the primitive returns `dependency_missing`.
+- `run_zerda_with_deps.sh` installs Chromium automatically into the custom-primitives cache when `playwright` is declared in merged custom primitive requirements.
+- The repository Dockerfile also provisions `scrapling[fetchers]`, `playwright`, and Chromium for locally built images, so bundled Scrapling primitives should still be available there even before custom runtime bootstrapping runs.
   - runtime default resolution still targets `~/.zerda/zerda.toml`
   - typical bare-metal deployment copies `zerda.toml.full` to that runtime path
 
