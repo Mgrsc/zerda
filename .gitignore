@@ -15,3 +15,8 @@ dev-file/
 __pycache__/
 *.py[cod]
 telemetry.jsonl
+custom_primitives/install.log
+custom_primitives/install.state
+custom_primitives/python-request.txt
+custom_primitives/requirements.merged.txt
+custom_primitives/requirements.sha256

@@ -129,7 +129,7 @@ Custom primitive registration:
 
 - `custom_primitives/catalog.py` is the registration point and source of truth for exposed custom primitives.
 - `code_primitives/python/primitives/catalog.py` is the registration point and source of truth for exposed built-in primitives.
-- Custom implementation files may be grouped into subpackages such as `custom_primitives/agent_browser/` and `custom_primitives/firecrawl/`.
+- Custom implementation files may be grouped into subpackages such as `custom_primitives/agent_browser/`, `custom_primitives/firecrawl/`, and `custom_primitives/smart_search/`.
 - Prompt-visible primitives are included only if they are registered in their source catalog.
 
 Prompt exposure policy:
@@ -140,7 +140,7 @@ Prompt exposure policy:
 - The built-in `shell` primitive keeps `command` as the canonical parameter name but also accepts `cmd` as a compatibility alias.
 - The model should inspect `<PTC_AVALIABLE_PRIMITIVES>` first, then use `help("name")` to discover methods and callable details before writing code.
 - Clear public names plus `help(...)` are now the main discovery surface.
-- Web routing is: `firecrawl_search_web` for URL discovery, Scrapling primitives for page fetching, and `agent_browser` for interactive validation and test flows.
+- Web routing is: `firecrawl_search_web` for URL discovery, `smart_search` for answer-style retrieval against a configured OpenAI-compatible `chat/completions` endpoint, Scrapling primitives for page fetching, and `agent_browser` for interactive validation and test flows.
 - `scrapling_fetch_page` routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body container extraction is preferred over full-page text.
 - `scrapling_fetch_page` also performs one automatic static-to-stealth retry for selected dynamic-content domains when the static result looks like a shell page or lacks usable body text.
 - `scrapling_fetch_page` depends on `scrapling[fetchers]` being installed in the Python runtime; otherwise it returns `dependency_missing`.
@@ -201,6 +201,9 @@ Prompt exposure policy:
 | `GROQ_API_KEY` | string | no | unset | STT | voice transcription unavailable |
 | `FIRECRAWL_API_KEY` | string | no | unset | external Firecrawl search primitive | web primitive calls fail |
 | `FIRECRAWL_BASE_URL` | URL | no | provider default | Firecrawl search primitive | requests hit wrong endpoint |
+| `SMART_SEARCH_URL` | URL | no | unset | `smart_search` custom primitive | answer-style retrieval primitive cannot reach the configured endpoint |
+| `SMART_SEARCH_API_KEY` | string | no | unset | `smart_search` custom primitive | answer-style retrieval primitive authentication fails |
+| `SMART_SEARCH_MODEL` | string | no | unset | `smart_search` custom primitive | answer-style retrieval primitive cannot build a valid request |
 | `AGENT_BROWSER_EXECUTABLE_PATH` | path | no | unset | external `agent-browser` runtime, when supported by the host installation | browser primitives may fail to launch the intended executable |
 | `ZERDA_PRIMITIVES_ROOT` | path | no | auto-discovery | primitive bootstrap | primitives may not load |
 

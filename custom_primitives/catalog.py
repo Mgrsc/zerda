@@ -34,9 +34,16 @@ from .agent_browser.api import (
     agent_browser_wait_for_text,
     agent_browser_wait_for_url,
 )
+from .divination import (
+    calculate_meihua,
+    convert_lunar_to_solar,
+    get_lunar_info,
+    get_sizhu_info,
+)
 from .extract_main_text_from_html import extract_main_text_from_html
 from .firecrawl import firecrawl_search_web
 from .scrapling import scrapling_fetch_page
+from .smart_search import smart_search
 
 PrimitiveCallable = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -76,8 +83,13 @@ def get_primitive_registry(
         "agent_browser_wait_for_selector": agent_browser_wait_for_selector,
         "agent_browser_wait_for_text": agent_browser_wait_for_text,
         "agent_browser_wait_for_url": agent_browser_wait_for_url,
+        "calculate_meihua": calculate_meihua,
+        "convert_lunar_to_solar": convert_lunar_to_solar,
         "extract_main_text_from_html": extract_main_text_from_html,
         "firecrawl_search_web": firecrawl_search_web,
+        "get_lunar_info": get_lunar_info,
+        "get_sizhu_info": get_sizhu_info,
         "scrapling_fetch_page": scrapling_fetch_page,
+        "smart_search": smart_search,
     }
     return {name: fn for name, fn in registry.items() if name not in disabled}

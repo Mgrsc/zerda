@@ -32,7 +32,6 @@
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Configuration](#-configuration)
 - [💻 CLI Guide](#-cli-guide)
-- [🔌 Extension Capabilities](#-extension-capabilities)
 - [🧬 Technical Design](#-technical-design)
 
 ---
@@ -43,7 +42,7 @@
 - 🔧 **PTC execution path**: mechanical work is pushed through PTC into async Python jobs, with filesystem, process, and web primitives executed through controlled artifacts.
 - ~~🔌 **MCP integration**~~: removed. The previous tools/MCP path has been unified into PTC.
 - ~~📜 **Dynamic Skills system**~~: removed. Future extensibility will move to Playbook instead.
-- 💬 **Multi-channel interaction**: supports immersive CLI use as well as remote access through Telegram Bot and WeChat Gateway. Telegram supports voice transcription, and WeChat supports QR login on startup plus persistent login reuse.
+- 💬 **Multi-channel interaction**: supports immersive CLI use as well as remote access through Telegram Bot and WeChat Gateway. The runtime currently supports only `telegram` and `wechat` channels.
 - 🗜️ **Context management**: long sessions are compacted automatically with local persistence to balance performance and continuity.
 - 🧠 **EMA memory**: provides single-user global long-term memory for asynchronously extracting, recalling, and consolidating preferences, constraints, events, and operational experience. All sessions currently share one global user memory space.
 
@@ -52,47 +51,30 @@
 ## 🚀 Quick Start
 
 <details open>
-<summary><b>🐳 Option 1: Docker (Recommended)</b></summary>
+<summary><b>🐳 Docker (Recommended)</b></summary>
 
-This is the fastest and safest way to deploy Zerda.
+Recommended deployment path.
 
 1. **Prepare a working directory**:
    ```bash
    mkdir zerda && cd zerda
    ```
 
-2. **Download the core runtime files**:
+2. **Download the required files**:
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/docker-compose.yml
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/.env.example && mv .env.example .env
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/zerda.toml
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/identity.md
+   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/{docker-compose.yml,.env.example,identity.md,zerda.toml.full} \
+     && mv .env.example .env \
+     && mv zerda.toml.full zerda.toml
    ```
 
 3. **Configure and start services**:
-   edit `.env`, fill in your API keys, then start the stack:
+   rename `zerda.toml.full` to `zerda.toml`, fill in `.env`, then start:
    ```bash
    docker compose up -d
    ```
 
 > For advanced setup, see [docker-compose.yml](docker-compose.yml).
-> The bundled `docker-compose.yml` starts Zerda, Chroma, and `wechat-agent-gateway`; the bundled `zerda.toml` enables EMA memory and points Chroma to `http://chroma:8000`.
-
-</details>
-
-<details>
-<summary><b>🔨 Option 2: Build from Source</b></summary>
-
-Use this for local development or custom builds:
-
-```bash
-git clone https://github.com/Mgrsc/zerda.git && cd zerda
-cargo build --release
-./target/release/zerda --config zerda.toml.full
-```
-
-> [!NOTE]
-> The runtime no longer provides a `reload` tool. After changing config, identity, or channel settings, restart the process directly.
+> The bundled stack starts Zerda, Chroma, and `wechat-agent-gateway`. Rename `zerda.toml.full` to `zerda.toml` before startup.
 
 </details>
 
@@ -100,70 +82,20 @@ cargo build --release
 
 ## ⚙️ Configuration
 
-Zerda uses TOML for runtime configuration and supports `${VAR}` expansion from environment variables.
-
-### 📦 Config Files
-
-- **[`zerda.toml`](zerda.toml)**: the Compose-ready config in this repository. It enables EMA memory and points Chroma to `http://chroma:8000`.
-- **[`zerda.toml.full`](zerda.toml.full)**: the fuller template for bare-metal or custom deployments. It also enables EMA memory, but points Chroma to `http://127.0.0.1:8000` by default.
-- ~~**`mcp.toml` (optional)**~~: removed. MCP is no longer supported.
-
-### 🧭 Config Resolution Priority
-
-Zerda resolves config files in this order:
-
-1. `--config` / `-c`
-2. `ZERDA_CONFIG`
-3. `~/.zerda/zerda.toml`
+Zerda uses TOML. Use [zerda.toml.full](zerda.toml.full) as the full template, rename it to `zerda.toml`, then start. Field-level notes are already in the file.
 
 ### 🔑 Environment Variables
 
-Zerda expands `${VAR}` placeholders inside TOML from the process environment.
+Zerda expands `${VAR}` in TOML from the process environment.
 
 - In Docker mode, `docker compose` loads `.env` automatically.
-- In manual mode, load `.env` into your shell before starting Zerda.
-- In most setups, one `.env` file plus TOML `${VAR}` references is enough.
+- Put `${VAR}` in `zerda.toml` and keep the real values in `.env`.
+- For manual startup, export `.env` before launching Zerda.
 - The maintained embedding defaults reuse `OPENAI_API_KEY` and `OPENAI_BASE_URL`; only change that path if embeddings must use a separate endpoint or credential.
-
-```bash
-set -a
-source ~/.zerda/.env
-set +a
-./target/release/zerda --config ~/.zerda/zerda.toml
-```
-
-Recommended manual runtime layout:
-
-- `~/.zerda/zerda.toml`
-- `~/.zerda/identity.md`
-- `~/.zerda/.env`
-
-Optional WeChat channel config:
-
-```toml
-[[channels]]
-name = "wechat"
-gateway_url = "http://127.0.0.1:8080"
-```
-
-If Zerda and `wechat-agent-gateway` run in the same Docker Compose stack, use the service name:
-
-```toml
-[[channels]]
-name = "wechat"
-gateway_url = "http://wechat-agent-gateway:8080"
-```
-
-Additional notes:
-
-- `zerda.toml` is the repository's Compose-ready config, while `zerda.toml.full` is for bare-metal or custom deployments.
-- EMA memory is enabled in the maintained configs and requires a reachable Chroma instance.
-- Bare-metal setups usually use `http://127.0.0.1:8000`; the bundled Compose stack uses `http://chroma:8000`.
-- `ZERDA_PRIMITIVES_ROOT` is only needed if you want to override the default primitive discovery path.
-- Built-in primitives live under `code_primitives/python/primitives/`; custom primitives live under `custom_primitives/`.
+- Current channel support is limited to `telegram` and `wechat`.
 - WeChat integration goes through [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway), not the WeChat protocol directly.
-- To avoid rescanning a QR code after restart, persist `WECHAT_GATEWAY_STATE_PATH` on the gateway side.
-- WeChat voice input uses the transcript returned by the gateway and does not require Zerda's `[stt]` config.
+- EMA memory requires a reachable Chroma instance. The bundled Compose stack uses `http://chroma:8000`.
+- `ZERDA_PRIMITIVES_ROOT` is only needed if you want to override the default primitive discovery path.
 
 ---
 
@@ -202,28 +134,6 @@ Busy-session behavior:
 - While a reply is streaming, `/status`, `/jobs`, `/job <id>`, and `/cancel-job <id>` return immediately.
 - `/compact` is queued and runs after the current turn finishes.
 - `/clear` and `/model <provider>@<model>` cancel the current turn first, then run the requested command.
-
----
-
-## 🔌 Extension Capabilities
-
-### ~~📜 Skills~~
-
-~~Skills used to be modular instruction bundles under `~/.zerda/skills/` for domain workflows and specialized guidance.~~
-
-Removed. Future extensibility will move to Playbook instead of restoring the old Skills system.
-
-### ~~🌐 MCP Integration~~
-
-~~MCP used to connect the agent to external systems such as databases, codebases, or cloud APIs.~~
-
-Removed. The old provider-level tools / MCP execution path has been fully consolidated into PTC.
-
-### ~~🔍 Documentation Search~~
-
-~~Zerda used to support semantic search over its own documentation through `search_zerda_documents`.~~
-
-The old docs-search tool has been removed. If this capability returns, it will come back as a PTC primitive or workflow instead of the old tool interface.
 
 ---
 

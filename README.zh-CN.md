@@ -32,7 +32,6 @@
 - [🚀 快速开始](#-快速开始)
 - [⚙️ 配置说明](#-配置说明)
 - [💻 CLI 使用手册](#-cli-使用手册)
-- [🔌 扩展能力](#-扩展能力)
 - [🧬 技术设计](#-技术设计)
 
 ---
@@ -43,7 +42,7 @@
 - 🔧 **PTC 执行路径**：机械执行统一通过 PTC 下推到异步 Python 作业，文件系统、进程、网页原语能力都通过受控工件链路运行。
 - ~~🔌 **MCP 生态接入**~~：已移除，原有工具/MCP 路径已统一迁移到 PTC。
 - ~~📜 **动态技能系统**~~：已移除，后续将迁移为 Playbook。
-- 💬 **多端交互体验**：不仅支持直接通过 CLI 终端进行沉浸式对话，还支持通过 Telegram Bot 与 WeChat Gateway 远程接入；其中 Telegram 支持语音消息转写，WeChat 支持启动时扫码登录与登录态复用。
+- 💬 **多端交互体验**：不仅支持直接通过 CLI 终端进行沉浸式对话，还支持通过 Telegram Bot 与 WeChat Gateway 远程接入；当前运行时仅支持 `telegram` 和 `wechat` 两种 channel。
 - 🗜️ **智能上下文管理**：面对超长会话，系统会自动进行对话历史的 LLM 压缩与本地持久化存储，兼顾性能与记忆。
 - 🧠 **EMA 记忆系统**：提供单用户全局长期记忆，支持偏好、约束、事件与操作经验的异步沉淀、召回与整理。当前 EMA 采用单一全局用户实体，所有会话天然共享同一套长期记忆。
 
@@ -52,52 +51,30 @@
 ## 🚀 快速开始
 
 <details open>
-<summary><b>🐳 方式一：Docker (推荐)</b></summary>
+<summary><b>🐳 Docker (推荐)</b></summary>
 
-这是最快捷且最安全的部署方式。
+推荐直接用这条路径部署。
 
 1. **准备环境目录**：
    ```bash
    mkdir zerda && cd zerda
    ```
 
-2. **下载核心配置文件**：
+2. **下载运行所需文件**：
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/docker-compose.yml
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/.env.example && mv .env.example .env
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/zerda.toml
-   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/identity.md
+   curl -fsSLO https://raw.githubusercontent.com/Mgrsc/zerda/main/{docker-compose.yml,.env.example,identity.md,zerda.toml.full} \
+     && mv .env.example .env \
+     && mv zerda.toml.full zerda.toml
    ```
 
 3. **配置与启动服务**：
-   编辑 `.env` 文件，填入你的 API Key，然后启动容器：
+   先把 `zerda.toml.full` 改名为 `zerda.toml`，填好 `.env` 后启动：
    ```bash
    docker compose up -d
    ```
 
 > 进阶配置请参考 [docker-compose.yml](docker-compose.yml)。
-> 仓库自带的 `docker-compose.yml` 会同时启动 Zerda、Chroma 和 `wechat-agent-gateway`；配套的 `zerda.toml` 已默认启用 EMA memory，并把 Chroma 地址指向 `http://chroma:8000`。
-
-</details>
-
-<details>
-<summary><b>🔨 方式二：从源码构建</b></summary>
-
-适合进行本地开发或定制化编译：
-
-```bash
-# 克隆项目仓库
-git clone https://github.com/Mgrsc/zerda.git && cd zerda
-
-# 编译 release 版本
-cargo build --release
-
-# 运行 Zerda
-./target/release/zerda --config zerda.toml.full
-```
-
-> [!NOTE]
-> 当前运行时不再提供 `reload` 工具。修改配置、身份文件或频道设置后，请直接重启进程。
+> 仓库自带的 Compose 栈会同时启动 Zerda、Chroma 和 `wechat-agent-gateway`。启动前先把 `zerda.toml.full` 改名为 `zerda.toml`。
 
 </details>
 
@@ -105,65 +82,19 @@ cargo build --release
 
 ## ⚙️ 配置说明
 
-Zerda 采用灵活的 TOML 格式进行配置，并支持通过 `${VAR}` 语法注入环境变量。
-
-### 📦 配置文件
-- **[`zerda.toml`](zerda.toml)**：仓库内的 Compose 就绪最小配置，默认启用 EMA memory，并把 Chroma 地址指向 Compose 服务 `http://chroma:8000`。
-- **[`zerda.toml.full`](zerda.toml.full)**：完整配置模板，适合裸机或自定义部署。它同样默认启用 EMA memory，但 Chroma 地址默认写成宿主机本地的 `http://127.0.0.1:8000`。
-- ~~**`mcp.toml`（可选）**~~：已移除，MCP 路径不再受支持。
-
-### 🧭 配置解析优先级
-Zerda 启动时按以下顺序确定配置文件：
-1. `--config` / `-c`
-2. 环境变量 `ZERDA_CONFIG`
-3. `~/.zerda/zerda.toml`
+Zerda 使用 TOML 配置。用 [zerda.toml.full](zerda.toml.full) 作为完整模板，改名为 `zerda.toml` 后再启动。字段说明已经写在文件里。
 
 ### 🔑 环境变量
-Zerda 会从进程环境变量中展开 TOML 内的 `${VAR}` 占位符。
+Zerda 会从进程环境变量中展开 TOML 里的 `${VAR}`。
 
 - Docker 模式：`docker compose` 会自动加载 `.env`。
-- 手动启动：先把 `.env` 导入 shell，再启动 Zerda。
-- 一般只需要维护一份 `.env`，TOML 里直接引用 `${VAR}` 即可。
+- 在 `zerda.toml` 里写 `${VAR}`，真实值放进 `.env`。
+- 手动启动时，先把 `.env` 导出到当前 shell。
 - 仓库维护的默认 embedding 配置会直接复用 `OPENAI_API_KEY` 与 `OPENAI_BASE_URL`；只有当 embedding 要走单独端点或凭据时，才需要额外改动。
-
-```bash
-set -a
-source ~/.zerda/.env
-set +a
-./target/release/zerda --config ~/.zerda/zerda.toml
-```
-
-手动启动推荐目录结构：
-- `~/.zerda/zerda.toml`
-- `~/.zerda/identity.md`
-- `~/.zerda/.env`
-
-可选 WeChat 通道配置：
-
-```toml
-[[channels]]
-name = "wechat"
-gateway_url = "http://127.0.0.1:8080"
-```
-
-如果 Zerda 和 `wechat-agent-gateway` 跑在同一个 Docker Compose 栈里，应改成服务名：
-
-```toml
-[[channels]]
-name = "wechat"
-gateway_url = "http://wechat-agent-gateway:8080"
-```
-
-补充说明：
-
-- `zerda.toml` 是仓库内的 Compose 就绪配置，`zerda.toml.full` 适合裸机或自定义部署。
-- EMA memory 在仓库维护的配置里默认开启，需要可访问的 Chroma。
-- 裸机运行时通常使用 `http://127.0.0.1:8000`；仓库自带 Compose 则使用 `http://chroma:8000`。
-- `ZERDA_PRIMITIVES_ROOT` 只有在你要覆盖默认原语发现路径时才需要设置。
-- 内置原语位于 `code_primitives/python/primitives/`，自定义原语位于 `custom_primitives/`。
+- 当前 channel 仅支持 `telegram` 和 `wechat`。
 - WeChat 通过 [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway) 接入，不直接处理微信协议。
-- 想避免重启后重新扫码，需要在 gateway 侧持久化 `WECHAT_GATEWAY_STATE_PATH`。
-- 微信语音直接使用 gateway 返回的转写文本，不依赖 Zerda 的 `[stt]` 配置。
+- EMA memory 需要可访问的 Chroma；仓库自带 Compose 默认使用 `http://chroma:8000`。
+- `ZERDA_PRIMITIVES_ROOT` 只有在你要覆盖默认原语发现路径时才需要设置。
 
 ---
 
@@ -202,25 +133,6 @@ Zerda 提供了功能丰富的命令行接口：
 - 在模型流式回复期间，`/status`、`/jobs`、`/job <id>`、`/cancel-job <id>` 会立即返回。
 - `/compact` 不打断当前轮次，会进入队列并在当前轮次结束后执行。
 - `/clear` 与 `/model <provider>@<model>` 会先取消当前轮次，再执行命令本身。
-
----
-
-## 🔌 扩展能力
-
-### ~~📜 技能系统 (Skills)~~
-~~Skills 是存放在 `~/.zerda/skills/` 目录下的模块化指令集。它们用于定义 Agent 的专业工作流和垂直领域知识。~~
-
-已移除。后续扩展能力会迁移到 Playbook，而不是恢复旧 Skills 机制。
-
-### ~~🌐 MCP 集成~~
-~~通过 Model Context Protocol (MCP)，安全地将 Agent 连接到外部生态系统（如本地数据库、代码仓库或云端 API）。~~
-
-已移除。旧的 provider-level tools / MCP 执行路径已经统一迁移为 PTC。
-
-### ~~🔍 文档搜索~~
-~~Zerda 通过 `search_zerda_documents` 工具支持对自身项目文档的语义搜索。~~
-
-旧 docs search 工具已移除。后续如果恢复，会以 PTC 原语或 PTC 工作流的形式重建，而不是恢复旧工具接口。
 
 ---
 

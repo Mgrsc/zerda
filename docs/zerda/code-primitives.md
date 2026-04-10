@@ -44,6 +44,7 @@ Override the core root path via `ZERDA_PRIMITIVES_ROOT` environment variable.
 - `agent_browser`
 - `extract_main_text_from_html`
 - `firecrawl_search_web`
+- `smart_search`
 - `scrapling_fetch_page`
 
 ## Runtime Discovery
@@ -61,7 +62,7 @@ Prompt policy:
 - Parameter shapes, defaults, and output fields should be learned through `help("name")`, not guessed from prompt text.
 - The built-in `shell` primitive uses `command` as its canonical parameter and also accepts `cmd` as a compatibility alias for model-generated code.
 - Some tools may also expose `get_workflow` for end-to-end setup or installation guidance after `help(...)` reveals that it exists.
-- Current web routing is Firecrawl for search, Scrapling primitives for page fetching, and `agent_browser` for interactive validation.
+- Current web routing is Firecrawl for URL discovery, `smart_search` for answer-style retrieval against a configured OpenAI-compatible `chat/completions` endpoint, Scrapling primitives for page fetching, and `agent_browser` for interactive validation.
 - `scrapling_fetch_page` automatically routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body extraction is preferred over full-page text.
 - `scrapling_fetch_page` also retries with stealth fetch on selected dynamic-content domains when the first static result looks like a shell page or lacks usable content.
 - `scrapling_fetch_page` requires `scrapling[fetchers]` in the Python runtime and returns `dependency_missing` when that runtime dependency is absent.
