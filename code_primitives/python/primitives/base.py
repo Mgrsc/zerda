@@ -18,6 +18,7 @@ from .types import ActionStatus, PrimitiveResult
 
 HARD_NETWORK_TIMEOUT_SECS = 15.0
 HARD_OPERATION_TIMEOUT_SECS = 25.0
+HARD_OPERATION_TIMEOUT_ENV = "PTC_PRIMITIVE_TIMEOUT_SECS"
 MAX_RETRIES = 2
 BACKOFF_BASE_SECS = 0.6
 MAX_URL_LENGTH = 2048
@@ -75,6 +76,21 @@ def emit_telemetry(
     ctx.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
     with ctx.telemetry_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def resolve_hard_operation_timeout_secs(explicit_timeout_secs: float | None = None) -> float:
+    if explicit_timeout_secs is not None:
+        return max(float(explicit_timeout_secs), 0.001)
+    raw = os.environ.get(HARD_OPERATION_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return HARD_OPERATION_TIMEOUT_SECS
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return HARD_OPERATION_TIMEOUT_SECS
+    if parsed <= 0:
+        return HARD_OPERATION_TIMEOUT_SECS
+    return parsed
 
 
 def validate_http_url(raw: str, field_name: str = "url") -> str:
@@ -207,11 +223,12 @@ async def run_with_guard(
     ctx: PrimitiveContext,
     operation: Callable[[], PrimitiveResult],
     max_retries: int = MAX_RETRIES,
-    hard_timeout_secs: float = HARD_OPERATION_TIMEOUT_SECS,
+    hard_timeout_secs: float | None = None,
     backoff_base_secs: float = BACKOFF_BASE_SECS,
 ) -> PrimitiveResult:
     started = time.perf_counter()
     attempts = 0
+    effective_hard_timeout_secs = resolve_hard_operation_timeout_secs(hard_timeout_secs)
     last = PrimitiveResult(
         status=ActionStatus.INTERNAL_ERROR,
         error_code="uninitialized",
@@ -223,14 +240,14 @@ async def run_with_guard(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(operation),
-                timeout=hard_timeout_secs,
+                timeout=effective_hard_timeout_secs,
             )
         except asyncio.TimeoutError:
             result = PrimitiveResult(
                 status=ActionStatus.TIMEOUT,
                 error_code="operation_timeout",
                 error_message=(
-                    f"Primitive execution exceeded hard timeout {hard_timeout_secs}s"
+                    f"Primitive execution exceeded hard timeout {effective_hard_timeout_secs}s"
                 ),
                 retryable=True,
             )

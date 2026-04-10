@@ -168,6 +168,7 @@ Prompt exposure policy:
 | `[agent].identity_path` | string | no | `~/.zerda/identity.md` | prepend identity to system prompt | wrong identity or missing file | startup and first prompt | inspect prompt parts |
 | `[agent].session_cleanup_days` | integer | no | `7` | old session retention | sessions grow or are deleted too soon | inspect session dir | compare timestamps |
 | `[agent].tool_timeout` | integer | no | `300` | per-PTC-job timeout seconds | jobs hang or terminate too early | launch long-running PTC | inspect `status.json` |
+| `[agent].primitive_timeout` | integer | no | `tool_timeout` | per-primitive hard timeout seconds for Python PTC execution | primitives fail too early or run longer than intended | launch a slow primitive | inspect `telemetry.jsonl` and primitive error payload |
 | `[agent].disabled_primitives` | list[string] | no | `[]` | disable named Python primitives | assistant loses primitive access | launch PTC job | inspect bootstrap globals |
 | `[agent.primary_model].model` | string | yes | none | active provider@model | startup fails | `config validate` | inspect active model |
 | `[agent.primary_model].vision` | bool | no | `true` | image handling | image messages degrade to text warning | send image | inspect turn payload |

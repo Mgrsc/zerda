@@ -28,6 +28,7 @@ Supported provider types:
 [agent]
 max_history = 30
 tool_timeout = 300
+primitive_timeout = 300
 disabled_primitives = []
 session_cleanup_days = 7
 identity_path = "~/.zerda/identity.md"
@@ -42,6 +43,7 @@ vision = true
 ```
 
 - `tool_timeout`: per-PTC-job timeout in seconds
+- `primitive_timeout`: per-primitive hard timeout in seconds; defaults to `tool_timeout` when omitted
 - `disabled_primitives`: blacklist of Python primitives
 - `fast_model`: used for compression when configured
 

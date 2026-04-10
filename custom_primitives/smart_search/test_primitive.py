@@ -159,6 +159,55 @@ class SmartSearchPrimitiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["authorization"], "Bearer sk-test")
         self.assertEqual(captured["content_type"], "application/json")
 
+    async def test_uses_smart_search_timeout_for_guard(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_run_with_guard(**kwargs):
+            captured["hard_timeout_secs"] = kwargs.get("hard_timeout_secs")
+            return kwargs["operation"]()
+
+        def fake_urlopen(request, timeout=0):
+            del request
+            del timeout
+            return FakeResponse(
+                {
+                    "id": "chatcmpl-123",
+                    "object": "chat.completion",
+                    "model": "grok-420",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "ok",
+                            },
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+            )
+
+        with patch.object(search, "run_with_guard", new=fake_run_with_guard):
+            with patch.object(search, "urlopen", new=fake_urlopen):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "SMART_SEARCH_URL": "https://grokkkk.oi-oi.de/v1/chat/completions",
+                        "SMART_SEARCH_API_KEY": "sk-test",
+                        "SMART_SEARCH_MODEL": "grok-420",
+                    },
+                    clear=False,
+                ):
+                    result = await search.smart_search(query="hermes agent")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(captured["hard_timeout_secs"], 300.0)
+
 
 if __name__ == "__main__":
     unittest.main()

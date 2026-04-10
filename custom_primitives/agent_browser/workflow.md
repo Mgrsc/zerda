@@ -12,6 +12,7 @@ Typical discovery order:
 
 Install before first use.
 npm install agent-browser
+agent-browser install
 
 ## Purpose
 

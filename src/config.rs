@@ -115,7 +115,15 @@ pub struct AgentConfig {
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout: u64,
     #[serde(default)]
+    pub primitive_timeout: Option<u64>,
+    #[serde(default)]
     pub disabled_primitives: Vec<String>,
+}
+
+impl AgentConfig {
+    pub fn effective_primitive_timeout(&self) -> u64 {
+        self.primitive_timeout.unwrap_or(self.tool_timeout)
+    }
 }
 
 const fn default_max_history() -> usize {
@@ -425,6 +433,17 @@ fn validate_config(config: &Config) -> Result<()> {
         );
     }
 
+    anyhow::ensure!(
+        config.agent.tool_timeout > 0,
+        "agent.tool_timeout must be greater than 0"
+    );
+    if let Some(primitive_timeout) = config.agent.primitive_timeout {
+        anyhow::ensure!(
+            primitive_timeout > 0,
+            "agent.primitive_timeout must be greater than 0"
+        );
+    }
+
     if config.memory.enabled {
         anyhow::ensure!(
             !config.memory.embedding.base_url.trim().is_empty(),
@@ -577,5 +596,56 @@ url = "http://127.0.0.1:8000"
         assert!(err
             .to_string()
             .contains("memory.embedding.dimensions must be greater than 0"));
+    }
+
+    #[test]
+    fn agent_primitive_timeout_defaults_to_tool_timeout() {
+        let path = temp_config_path("zerda-agent-primitive-timeout-default");
+        std::fs::write(
+            &path,
+            r#"
+[providers.openai]
+type = "openai_chat"
+api_key = "test-key"
+
+[agent]
+tool_timeout = 300
+
+[agent.primary_model]
+model = "openai@gpt-4o"
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(Some(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(loaded.agent.effective_primitive_timeout(), 300);
+    }
+
+    #[test]
+    fn agent_primitive_timeout_allows_explicit_override() {
+        let path = temp_config_path("zerda-agent-primitive-timeout-override");
+        std::fs::write(
+            &path,
+            r#"
+[providers.openai]
+type = "openai_chat"
+api_key = "test-key"
+
+[agent]
+tool_timeout = 300
+primitive_timeout = 45
+
+[agent.primary_model]
+model = "openai@gpt-4o"
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(Some(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(loaded.agent.effective_primitive_timeout(), 45);
     }
 }

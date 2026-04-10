@@ -111,7 +111,7 @@ impl SqliteStore {
             let mut stmt = tx.prepare(
                 "SELECT DISTINCT turn_id
                  FROM memory_turn_journal
-                 WHERE extract_status = 'pending'
+                 WHERE extract_status = 'pending' AND role = 'user'
                  ORDER BY id ASC
                  LIMIT ?1",
             )?;
@@ -145,7 +145,7 @@ impl SqliteStore {
              FROM (
                  SELECT turn_id, MIN(created_at) AS created_at
                  FROM memory_turn_journal
-                 WHERE extract_status = 'pending'
+                 WHERE extract_status = 'pending' AND role = 'user'
                  GROUP BY turn_id
              )",
         )?;
@@ -936,6 +936,40 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].turn_id, "turn-1");
         assert_eq!(claimed[0].messages.len(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn claim_pending_turns_ignores_turns_without_user_messages() {
+        let path = temp_db_path("zerda-memory-claim-user-only");
+        let store = SqliteStore::new(path.clone()).unwrap();
+        store
+            .append_turn_messages(
+                "turn-1",
+                "session-1",
+                "entity-1",
+                Some("cli"),
+                &[JournalMessage::new("assistant", "assistant only")],
+            )
+            .unwrap();
+        store
+            .append_turn_messages(
+                "turn-2",
+                "session-1",
+                "entity-1",
+                Some("cli"),
+                &[
+                    JournalMessage::new("user", "hello"),
+                    JournalMessage::new("assistant", "hi"),
+                ],
+            )
+            .unwrap();
+
+        let claimed = store.claim_pending_turns(8).unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].turn_id, "turn-2");
 
         std::fs::remove_file(path).ok();
     }

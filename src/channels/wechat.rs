@@ -822,10 +822,13 @@ fn ends_with_connector(text: &str) -> bool {
 fn split_fragments(text: &str) -> Vec<String> {
     let mut fragments = Vec::new();
     let mut current = String::new();
+    let mut chars = text.chars().peekable();
 
-    for ch in text.chars() {
+    while let Some(ch) = chars.next() {
         current.push(ch);
-        if matches!(ch, '。' | '！' | '？' | '!' | '?' | ';' | '；') {
+        let next = chars.peek().copied();
+        let ends_english_sentence = ch == '.' && next.is_none_or(|next_ch| next_ch.is_whitespace());
+        if matches!(ch, '。' | '！' | '？' | '!' | '?' | ';' | '；') || ends_english_sentence {
             push_fragment(&mut fragments, &mut current);
         }
     }

@@ -270,6 +270,7 @@ async fn main() -> Result<()> {
                     let manager = ptc::job_manager::JobManager::new(
                         tx,
                         hot.cfg.agent.tool_timeout,
+                        hot.cfg.agent.effective_primitive_timeout(),
                         hot.cfg.agent.disabled_primitives.clone(),
                         (
                             Arc::clone(&hot.compression_provider.0),

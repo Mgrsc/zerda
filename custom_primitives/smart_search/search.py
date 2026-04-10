@@ -276,6 +276,7 @@ async def smart_search(
             query=parsed_query,
             max_tokens=parsed_max_tokens,
         ),
+        hard_timeout_secs=SMART_SEARCH_TIMEOUT_SECS,
     )
     if result.status == ActionStatus.OK:
         result.data = _normalize_chat_data(result.data, fallback_model=resolved_model)

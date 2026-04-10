@@ -20,6 +20,7 @@ use crate::ptc::parser::{PtcRequest, PtcRequestKind};
 const PTC_JOB_DIR: &str = "~/.zerda/ptc_jobs";
 const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
 const PTC_PYTHON_ENV: &str = "ZERDA_PTC_PYTHON";
+const PTC_PRIMITIVE_TIMEOUT_ENV: &str = "PTC_PRIMITIVE_TIMEOUT_SECS";
 const DEFAULT_PTC_PYTHON: &str = "/opt/zerda-python/bin/python";
 const PRIMITIVES_ROOT: &str = "code_primitives/python";
 const DEFAULT_SYSTEM_PRIMITIVES_ROOT: &str = "/usr/local/share/zerda/code_primitives/python";
@@ -81,6 +82,7 @@ pub struct JobManager {
     inner: Arc<RwLock<std::collections::HashMap<String, PtcJobSummary>>>,
     tx: mpsc::Sender<ChannelMessage>,
     timeout_secs: u64,
+    primitive_timeout_secs: u64,
     working_dir: PathBuf,
     primitives_py_roots: Vec<PathBuf>,
     bootstrap_path: Option<PathBuf>,
@@ -92,6 +94,7 @@ impl JobManager {
     pub fn new(
         tx: mpsc::Sender<ChannelMessage>,
         timeout_secs: u64,
+        primitive_timeout_secs: u64,
         disabled_primitives: Vec<String>,
         compression_provider: (Arc<dyn Provider>, ChatOptions),
     ) -> Self {
@@ -105,6 +108,7 @@ impl JobManager {
             inner: Arc::new(RwLock::new(std::collections::HashMap::new())),
             tx,
             timeout_secs,
+            primitive_timeout_secs,
             working_dir,
             primitives_py_roots,
             bootstrap_path,
@@ -269,31 +273,22 @@ impl JobManager {
 
         let python_executable = resolve_ptc_python_executable();
         let mut command = Command::new(&python_executable);
+        let runtime_env = build_python_runtime_env(
+            &summary,
+            session,
+            &self.working_dir,
+            &self.primitives_py_roots,
+            &self.disabled_primitives,
+            self.primitive_timeout_secs,
+        );
         command
             .arg(&summary.script_path)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .kill_on_drop(false)
-            .current_dir(&self.working_dir)
-            .env("PTC_OUT_PATH", &summary.out_path)
-            .env("PTC_LOG_PATH", &summary.log_path)
-            .env("PTC_TELEMETRY_PATH", &summary.telemetry_path)
-            .env("PTC_ARTIFACT_DIR", &summary.artifact_dir)
-            .env("PTC_WORKING_DIR", &self.working_dir)
-            .env("PTC_JOB_ID", &summary.job_id)
-            .env("PTC_SESSION_KEY", session.session_key())
-            .env(
-                "PTC_DISABLED_PRIMITIVES",
-                serde_json::to_string(&self.disabled_primitives)
-                    .unwrap_or_else(|_| "[]".to_string()),
-            )
-            .env(
-                "PTC_PRIMITIVES_PY_ROOTS",
-                serde_json::to_string(&self.primitives_py_roots)
-                    .unwrap_or_else(|_| "[]".to_string()),
-            );
-        if let Some(root) = self.primitives_py_roots.first() {
-            command.env("PTC_PRIMITIVES_PY_ROOT", root);
+            .current_dir(&self.working_dir);
+        for (key, value) in runtime_env {
+            command.env(key, value);
         }
 
         let mut child = command.spawn()?;
@@ -794,6 +789,58 @@ fn resolve_primitives_roots(working_dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn build_python_runtime_env(
+    summary: &PtcJobSummary,
+    session: &PtcSessionContext,
+    working_dir: &Path,
+    primitives_py_roots: &[PathBuf],
+    disabled_primitives: &[String],
+    primitive_timeout_secs: u64,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        "PTC_OUT_PATH".to_string(),
+        summary.out_path.display().to_string(),
+    );
+    env.insert(
+        "PTC_LOG_PATH".to_string(),
+        summary.log_path.display().to_string(),
+    );
+    env.insert(
+        "PTC_TELEMETRY_PATH".to_string(),
+        summary.telemetry_path.display().to_string(),
+    );
+    env.insert(
+        "PTC_ARTIFACT_DIR".to_string(),
+        summary.artifact_dir.display().to_string(),
+    );
+    env.insert(
+        "PTC_WORKING_DIR".to_string(),
+        working_dir.display().to_string(),
+    );
+    env.insert("PTC_JOB_ID".to_string(), summary.job_id.clone());
+    env.insert("PTC_SESSION_KEY".to_string(), session.session_key());
+    env.insert(
+        "PTC_DISABLED_PRIMITIVES".to_string(),
+        serde_json::to_string(disabled_primitives).unwrap_or_else(|_| "[]".to_string()),
+    );
+    env.insert(
+        "PTC_PRIMITIVES_PY_ROOTS".to_string(),
+        serde_json::to_string(primitives_py_roots).unwrap_or_else(|_| "[]".to_string()),
+    );
+    env.insert(
+        PTC_PRIMITIVE_TIMEOUT_ENV.to_string(),
+        primitive_timeout_secs.to_string(),
+    );
+    if let Some(root) = primitives_py_roots.first() {
+        env.insert(
+            "PTC_PRIMITIVES_PY_ROOT".to_string(),
+            root.display().to_string(),
+        );
+    }
+    env
+}
+
 fn resolve_ptc_python_executable() -> String {
     std::env::var(PTC_PYTHON_ENV)
         .ok()
@@ -1005,5 +1052,30 @@ mod tests {
         unsafe {
             std::env::remove_var(PTC_PYTHON_ENV);
         }
+    }
+
+    #[test]
+    fn python_runtime_env_includes_primitive_timeout() {
+        let working_dir = PathBuf::from("/tmp/zerda-working");
+        let summary = test_job_summary(Path::new("/tmp/zerda-artifacts"));
+        let session = PtcSessionContext {
+            channel: "cli".to_string(),
+            session_id: "test-session".to_string(),
+            sender: "tester".to_string(),
+            main_model_request: "search hermes agent".to_string(),
+        };
+        let envs = build_python_runtime_env(
+            &summary,
+            &session,
+            &working_dir,
+            &[PathBuf::from("/tmp/primitives")],
+            &["shell".to_string()],
+            45,
+        );
+
+        assert_eq!(
+            envs.get("PTC_PRIMITIVE_TIMEOUT_SECS").map(String::as_str),
+            Some("45")
+        );
     }
 }

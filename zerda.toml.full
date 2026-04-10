@@ -48,6 +48,9 @@ identity_path = "~/.zerda/identity.md"
 session_cleanup_days = 7
 # Per PTC job timeout in seconds.
 tool_timeout = 300
+# Optional per-primitive hard timeout in seconds.
+# Defaults to `tool_timeout` when omitted.
+# primitive_timeout = 300
 # Primitive blacklist.
 # Example values depend on the installed primitives, e.g. ["shell", "process_spawn"].
 # Use `[]` to keep everything enabled.

@@ -361,6 +361,7 @@ pub async fn run_interactive(
     hot.job_manager = Some(Arc::new(JobManager::new(
         tx.clone(),
         hot.cfg.agent.tool_timeout,
+        hot.cfg.agent.effective_primitive_timeout(),
         hot.cfg.agent.disabled_primitives.clone(),
         (
             Arc::clone(&hot.compression_provider.0),
@@ -654,6 +655,7 @@ pub async fn run_serve(
     hot.job_manager = Some(Arc::new(JobManager::new(
         tx.clone(),
         hot.cfg.agent.tool_timeout,
+        hot.cfg.agent.effective_primitive_timeout(),
         hot.cfg.agent.disabled_primitives.clone(),
         (
             Arc::clone(&hot.compression_provider.0),
