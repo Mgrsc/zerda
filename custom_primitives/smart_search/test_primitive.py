@@ -155,6 +155,7 @@ class SmartSearchPrimitiveTests(unittest.IsolatedAsyncioTestCase):
             captured["url"],
             "https://grokkkk.oi-oi.de/v1/chat/completions",
         )
+        self.assertEqual(captured["timeout"], 300.0)
         self.assertEqual(captured["authorization"], "Bearer sk-test")
         self.assertEqual(captured["content_type"], "application/json")
 

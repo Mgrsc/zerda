@@ -8,7 +8,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from primitives.base import (
-    HARD_NETWORK_TIMEOUT_SECS,
     PrimitiveContext,
     dependency_missing_result,
     invalid_argument_result,
@@ -24,6 +23,7 @@ MAX_QUERY_LENGTH = 4000
 MAX_MODEL_LENGTH = 200
 MAX_RESPONSE_TOKENS = 32768
 DEFAULT_MAX_TOKENS = 4096
+SMART_SEARCH_TIMEOUT_SECS = 300.0
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
@@ -217,7 +217,7 @@ def _search_operation(
         endpoint_url=endpoint_url,
         api_key=api_key,
         payload=payload,
-        timeout_secs=HARD_NETWORK_TIMEOUT_SECS,
+        timeout_secs=SMART_SEARCH_TIMEOUT_SECS,
     )
 
 
