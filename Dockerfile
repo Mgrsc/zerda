@@ -26,7 +26,7 @@ RUN useradd -m builder && \
 
 USER root
 RUN pacman -S --noconfirm --needed \
-    nodejs npm python python-pipx uv \
+    nodejs npm uv \
     alsa-lib nss nspr gtk3 pango cairo at-spi2-core \
     libxcomposite libxdamage libxext libxfixes libxrandr \
     libxkbcommon libxkbcommon-x11 libxi libxtst libxcursor \
@@ -35,11 +35,13 @@ RUN pacman -S --noconfirm --needed \
 
 ENV VIRTUAL_ENV=/opt/zerda-python
 ENV PATH=/opt/zerda-python/bin:$PATH
+ENV ZERDA_PTC_PYTHON=/opt/zerda-python/bin/python
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV UV_MANAGED_PYTHON=1
 
-RUN python -m venv "$VIRTUAL_ENV" && \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" 'scrapling[fetchers]==0.4.3' playwright && \
-    "$VIRTUAL_ENV/bin/python" -m playwright install chromium && \
+RUN uv venv --python 3.13 "$VIRTUAL_ENV" && \
+    uv pip install --python "$ZERDA_PTC_PYTHON" 'scrapling[fetchers]==0.4.3' playwright && \
+    "$ZERDA_PTC_PYTHON" -m playwright install chromium && \
     pacman -Scc --noconfirm
 
 COPY --from=builder /build/target/release/zerda /usr/local/bin/zerda

@@ -5,6 +5,7 @@
 | Variable | Description |
 |---|---|
 | `ZERDA_CONFIG` | Path to the active config file |
+| `ZERDA_PTC_PYTHON` | Unified Python runtime path for PTC jobs and custom primitive dependency installation, defaulting to `/opt/zerda-python/bin/python` in the bundled image created with `uv venv --python 3.13` |
 | `ZERDA_PRIMITIVES_ROOT` | Override code primitives root directory |
 
 ## Providers
@@ -36,7 +37,7 @@
 | `FIRECRAWL_API_KEY` | Firecrawl API key for the search primitive |
 | `FIRECRAWL_BASE_URL` | Firecrawl API base URL override |
 
-Runtime note: `scrapling_fetch_page` does not use an environment variable, but it does require the Python runtime to have `scrapling[fetchers]` installed. It may also require Playwright browser binaries when its internal stealth path is used for selected dynamic domains. Otherwise the primitive returns `dependency_missing`.
+Runtime note: `scrapling_fetch_page` does not use its own environment variable, but it does require the unified PTC Python runtime referenced by `ZERDA_PTC_PYTHON` to have `scrapling[fetchers]` and `playwright` installed. `run_zerda_with_deps.sh` installs Chromium before Zerda startup when `playwright` is declared in merged custom primitive requirements. Otherwise the primitive returns `dependency_missing`.
 
 Memory note: the maintained configs reuse `OPENAI_API_KEY` for the default EMA embedding endpoint. If you want EMA embeddings to use a different credential, edit `memory.embedding.api_key` in TOML directly.
 

@@ -65,8 +65,8 @@ Prompt policy:
 - Current web routing is Firecrawl for URL discovery, `smart_search` for answer-style retrieval against a configured OpenAI-compatible `chat/completions` endpoint, Scrapling primitives for page fetching, and `agent_browser` for interactive validation.
 - `scrapling_fetch_page` automatically routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body extraction is preferred over full-page text.
 - `scrapling_fetch_page` also retries with stealth fetch on selected dynamic-content domains when the first static result looks like a shell page or lacks usable content.
-- `scrapling_fetch_page` requires `scrapling[fetchers]` in the Python runtime and returns `dependency_missing` when that runtime dependency is absent.
-- `scrapling_fetch_page` may also require Playwright browser binaries when its internal stealth path is needed for selected dynamic-content domains.
+- `scrapling_fetch_page` requires `scrapling[fetchers]` and `playwright` in the unified PTC Python runtime and returns `dependency_missing` when those runtime dependencies are absent.
+- `scrapling_fetch_page` may also require Playwright browser binaries when its internal stealth path is needed for selected dynamic-content domains; `run_zerda_with_deps.sh` installs Chromium before Zerda startup when `playwright` is declared in custom primitive requirements.
 - Python execution surface should stay thin: prefer a single `<PTC_TOOL_CALLING>` block carrying async body code directly.
 
 ## Primitive Enablement

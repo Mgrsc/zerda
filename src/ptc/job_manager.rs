@@ -19,6 +19,8 @@ use crate::ptc::parser::{PtcRequest, PtcRequestKind};
 
 const PTC_JOB_DIR: &str = "~/.zerda/ptc_jobs";
 const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
+const PTC_PYTHON_ENV: &str = "ZERDA_PTC_PYTHON";
+const DEFAULT_PTC_PYTHON: &str = "/opt/zerda-python/bin/python";
 const PRIMITIVES_ROOT: &str = "code_primitives/python";
 const DEFAULT_SYSTEM_PRIMITIVES_ROOT: &str = "/usr/local/share/zerda/code_primitives/python";
 const RESULT_COMPRESSION_TRIGGER_CHARS: usize = 8_000;
@@ -243,7 +245,7 @@ impl JobManager {
         session: &PtcSessionContext,
         summary: PtcJobSummary,
         request: &PtcRequest,
-        python: &str,
+        python_code: &str,
     ) -> Result<PtcJobSummary> {
         std::fs::create_dir_all(&summary.artifact_dir)?;
         write_request_context(&summary, &session.main_model_request)?;
@@ -251,7 +253,7 @@ impl JobManager {
         std::fs::write(
             &summary.script_path,
             build_bootstrapped_code(
-                python,
+                python_code,
                 self.bootstrap_path.as_ref(),
                 &summary.out_path,
                 &summary.log_path,
@@ -265,7 +267,8 @@ impl JobManager {
             .open(&summary.log_path)?;
         let stderr_file = stdout_file.try_clone()?;
 
-        let mut command = Command::new("python3");
+        let python_executable = resolve_ptc_python_executable();
+        let mut command = Command::new(&python_executable);
         command
             .arg(&summary.script_path)
             .stdout(Stdio::from(stdout_file))
@@ -791,11 +794,19 @@ fn resolve_primitives_roots(working_dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn resolve_ptc_python_executable() -> String {
+    std::env::var(PTC_PYTHON_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_PTC_PYTHON.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -811,6 +822,8 @@ mod tests {
         replies: Mutex<VecDeque<StubReply>>,
         prompts: Mutex<Vec<String>>,
     }
+
+    static PTC_PYTHON_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     impl StubProvider {
         fn new(replies: Vec<StubReply>) -> Self {
@@ -971,5 +984,26 @@ mod tests {
         assert!(inline_result.contains(&job.out_path.display().to_string()));
         assert!(inline_result.len() < raw_result.len());
         std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn ptc_python_defaults_to_global_python_symlink() {
+        let _guard = PTC_PYTHON_ENV_LOCK.lock().expect("ptc python env lock");
+        unsafe {
+            std::env::remove_var(PTC_PYTHON_ENV);
+        }
+        assert_eq!(resolve_ptc_python_executable(), DEFAULT_PTC_PYTHON);
+    }
+
+    #[test]
+    fn ptc_python_allows_explicit_override() {
+        let _guard = PTC_PYTHON_ENV_LOCK.lock().expect("ptc python env lock");
+        unsafe {
+            std::env::set_var(PTC_PYTHON_ENV, "/custom/python");
+        }
+        assert_eq!(resolve_ptc_python_executable(), "/custom/python");
+        unsafe {
+            std::env::remove_var(PTC_PYTHON_ENV);
+        }
     }
 }

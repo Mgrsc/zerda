@@ -6,14 +6,10 @@ CUSTOM_ROOT="$ROOT_DIR/custom_primitives"
 CACHE_ROOT="${ZERDA_CUSTOM_PRIMITIVES_CACHE_DIR:-${HOME:-$ROOT_DIR}/.zerda/custom_primitives}"
 STAMP_PATH="$CACHE_ROOT/requirements.sha256"
 BROWSER_STAMP_PATH="$CACHE_ROOT/playwright.sha256"
-PYTHON_REQUEST="${ZERDA_CUSTOM_PRIMITIVES_PYTHON:-${ZERDA_CUSTOM_PRIMITIVES_PYTHON_VERSION:-3.13}}"
-VENV_PATH="${ZERDA_CUSTOM_PRIMITIVES_VENV_PATH:-$CACHE_ROOT/venv}"
-PYTHON_REQUEST_STAMP="$CACHE_ROOT/python-request.txt"
+PYTHON_BIN="${ZERDA_PTC_PYTHON:-/opt/zerda-python/bin/python}"
 MERGED_REQUIREMENTS_PATH="$CACHE_ROOT/requirements.merged.txt"
 STATE_PATH="$CACHE_ROOT/install.state"
 LOG_PATH="$CACHE_ROOT/install.log"
-PID_PATH="$CACHE_ROOT/install.pid"
-STATUS_FIFO_PATH="$CACHE_ROOT/install.status"
 PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$CACHE_ROOT/ms-playwright}"
 
 ensure_cache_root() {
@@ -24,12 +20,10 @@ write_state() {
     printf '%s\n' "$1" > "$STATE_PATH"
 }
 
-activate_custom_venv() {
+prepare_runtime_env() {
     export ZERDA_CUSTOM_PRIMITIVES_CACHE_DIR="$CACHE_ROOT"
-    export ZERDA_CUSTOM_PRIMITIVES_VENV_PATH="$VENV_PATH"
-    export VIRTUAL_ENV="$VENV_PATH"
+    export ZERDA_PTC_PYTHON="$PYTHON_BIN"
     export PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_DIR"
-    export PATH="$VENV_PATH/bin:$PATH"
 }
 
 needs_playwright_install() {
@@ -49,21 +43,7 @@ needs_playwright_install() {
     return 1
 }
 
-merged_requirements_need_playwright() {
-    grep -Eiq '^[[:space:]]*playwright([[:space:]]*(\[.*\])?)?([<>=!~].*)?$' "$MERGED_REQUIREMENTS_PATH"
-}
-
 needs_install() {
-    previous_request=""
-    if [ -f "$PYTHON_REQUEST_STAMP" ]; then
-        previous_request="$(tr -d '\n' < "$PYTHON_REQUEST_STAMP")"
-    fi
-    if [ "$previous_request" != "$PYTHON_REQUEST" ]; then
-        return 0
-    fi
-    if [ ! -x "$VENV_PATH/bin/python" ]; then
-        return 0
-    fi
     previous_digest=""
     if [ -f "$STAMP_PATH" ]; then
         previous_digest="$(tr -d '\n' < "$STAMP_PATH")"
@@ -74,45 +54,36 @@ needs_install() {
     return 1
 }
 
-install_requirements_background() {
-    if [ -f "$PID_PATH" ]; then
-        existing_pid="$(tr -d '\n' < "$PID_PATH" 2>/dev/null || true)"
-        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
+merged_requirements_need_playwright() {
+    grep -Eiq '^[[:space:]]*playwright([[:space:]]*(\[.*\])?)?([<>=!~].*)?$' "$MERGED_REQUIREMENTS_PATH"
+}
 
-    (
+require_python_bin() {
+    if [ ! -x "$PYTHON_BIN" ]; then
+        echo "Unified PTC Python runtime not found at $PYTHON_BIN" >&2
+        exit 1
+    fi
+}
+
+install_requirements() {
+    write_state "installing"
+    if {
         set -euo pipefail
         ensure_cache_root
-        printf '%s\n' "$$" > "$PID_PATH"
-        write_state "installing"
-        {
-            if [ -d "$VENV_PATH" ]; then
-                previous_request=""
-                if [ -f "$PYTHON_REQUEST_STAMP" ]; then
-                    previous_request="$(tr -d '\n' < "$PYTHON_REQUEST_STAMP")"
-                fi
-                if [ "$previous_request" != "$PYTHON_REQUEST" ]; then
-                    rm -rf "$VENV_PATH"
-                fi
-            fi
-            uv venv --allow-existing --python "$PYTHON_REQUEST" "$VENV_PATH"
-            uv pip install --python "$VENV_PATH/bin/python" -r "$MERGED_REQUIREMENTS_PATH"
-            if merged_requirements_need_playwright && needs_playwright_install "$1"; then
-                "$VENV_PATH/bin/python" -m playwright install chromium
-                printf '%s\n' "$1" > "$BROWSER_STAMP_PATH"
-            fi
-            printf '%s\n' "$PYTHON_REQUEST" > "$PYTHON_REQUEST_STAMP"
-            printf '%s\n' "$1" > "$STAMP_PATH"
-            write_state "ready"
-            printf '%s\n' "[custom-primitives] dependency install ready" >/proc/1/fd/1
-        } || {
-            write_state "failed"
-            printf '%s\n' "[custom-primitives] dependency install failed" >/proc/1/fd/2
-        }
-        rm -f "$PID_PATH"
-    ) >>"$LOG_PATH" 2>&1 &
+        uv pip install --python "$PYTHON_BIN" -r "$MERGED_REQUIREMENTS_PATH"
+        if merged_requirements_need_playwright && needs_playwright_install "$1"; then
+            "$PYTHON_BIN" -m playwright install chromium
+            printf '%s\n' "$1" > "$BROWSER_STAMP_PATH"
+        fi
+        printf '%s\n' "$1" > "$STAMP_PATH"
+    } >>"$LOG_PATH" 2>&1; then
+        write_state "ready"
+        echo "[custom-primitives] dependency install ready"
+        return 0
+    fi
+    write_state "failed"
+    echo "[custom-primitives] dependency install failed" >&2
+    return 1
 }
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -130,7 +101,8 @@ mapfile -t requirement_files < <(
 )
 
 ensure_cache_root
-activate_custom_venv
+prepare_runtime_env
+require_python_bin
 
 if [ "${#requirement_files[@]}" -gt 0 ]; then
     awk '
@@ -150,8 +122,8 @@ if [ "${#requirement_files[@]}" -gt 0 ]; then
             should_install=1
         fi
         if [ "$should_install" -eq 1 ]; then
-            echo "[custom-primitives] dependency install started in background"
-            install_requirements_background "$digest"
+            echo "[custom-primitives] installing runtime dependencies"
+            install_requirements "$digest"
         else
             write_state "ready"
             echo "[custom-primitives] dependency install already satisfied"
