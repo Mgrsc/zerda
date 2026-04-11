@@ -1,0 +1,12 @@
+[project]
+name = "zerda-custom-scrapling"
+version = "0.1.0"
+dependencies = ["playwright", "scrapling[fetchers]"]
+
+[tool.zerda]
+playwright-browsers = ["chromium"]
+
+[[tool.zerda.exports]]
+name = "scrapling_fetch_page"
+module = "custom_primitives.scrapling.fetch_page"
+callable = "scrapling_fetch_page"

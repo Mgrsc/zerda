@@ -1,0 +1,26 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "sxtwl"
+version = "2.0.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/e3/ee4e81d6759ccbc5718308108f94edc7fd962024bd9bb042169c542febf4/sxtwl-2.0.7.tar.gz", hash = "sha256:38b24472389f7f6f3521c2c99e4b5e86c0184c7d6eb02e5409c239d21f0a6512", size = 163780, upload-time = "2024-09-05T16:04:41.89Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/e9/9dcd837900b4aa2abcb2c55b507925639ee9ef5f02e6fa8ef20d67c56586/sxtwl-2.0.7-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8d1143cca29c7e635fcd9877b54f9f07057c99275ebf547586e4e1c572513cef", size = 1170059, upload-time = "2024-09-06T02:39:50.37Z" },
+    { url = "https://files.pythonhosted.org/packages/65/34/367d19786a14aa1e0a78b9091ff17376b3dfa6eb1c738ac460d65f41955c/sxtwl-2.0.7-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:2e9e1596b7c943d31d411d987d2231d461e83eb24b0d317de3cd8d43faea8609", size = 1118834, upload-time = "2024-09-06T02:39:52.327Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/02/7d8736b89768c4f2361e96a13fd3e2c6e28590558f70b39de0b43ea67c4b/sxtwl-2.0.7-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:75e022c1601b321a93592d0b2464c1139dafe2bc86c42136eb3837905afd231f", size = 1176969, upload-time = "2024-09-06T02:39:53.864Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/4a/bbc4e45255001353cf52967698e37cefa81b03ad46d728f5b42e9e575f63/sxtwl-2.0.7-cp313-cp313t-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:ef8db940b98583e3916486c0d5433f987500f1331bfb027753416a9de33f9487", size = 1129606, upload-time = "2024-09-06T02:39:55.377Z" },
+]
+
+[[package]]
+name = "zerda-custom-divination"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "sxtwl" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "sxtwl", specifier = "==2.0.7" }]

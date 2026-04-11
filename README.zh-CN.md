@@ -108,6 +108,8 @@ Zerda 提供了功能丰富的命令行接口：
 | `zerda run -m "<消息>"` | 执行单条指令后立即退出。 |
 | `zerda run --resume [session_id]` | 恢复最近会话，或按会话 ID 恢复指定会话。 |
 | `zerda serve` | 启动后台服务（例如 Telegram Bot 或 WeChat 通道监听）。 |
+| `zerda primitives sync` | 同步 custom primitive package 的隔离环境。 |
+| `zerda primitives doctor` | 查看 custom primitive package 的就绪状态。 |
 | `zerda config generate` | 输出完整配置模板（`zerda.toml.full`）。 |
 | `zerda config validate` | 校验当前生效配置并退出。 |
 
@@ -145,32 +147,28 @@ Zerda 提供了功能丰富的命令行接口：
 
 Zerda 的系统提示词（System Prompt）完全静态化。identity、rules、环境元数据在构建时固定写入，所有动态内容（时间戳、任务状态、记忆召回上下文）仅注入到用户消息（User Message）的末端，绝不侵入系统提示词。会话历史遵循仅追加（Append-Only）原则：消息不做回溯修改，仅从头部截断或尾部追加，最大化 KV-Cache 前缀命中率。
 
-### ~~Planner-Executor 解耦架构~~
+### 当前运行时
 
-~~Zerda 已从单体 ReAct 循环迁移为双层职责架构。高层负责理解用户意图与收敛回答，机械执行通过 PTC 异步作业完成。通过策略层与执行层的物理隔离，主链路上下文中的低层噪声显著减少，长对话下稳定性更好。~~
-
-当前运行时已经收敛为单助手对话主链路加异步 PTC 作业，`Planner-Executor` 仅作为迁移历史保留。
-
-### 编译器模式（Compiler Pattern）
-
-在高层推理与执行之间，Zerda 采用编译器模式（Compiler Pattern）：把用户请求和环境反馈压缩为高密度结构化指令，再交给执行层处理。指令格式依然保持 `ACTION(params) -> {return_fields}` 的紧凑形式，降低委托阶段的解释成本。
+当前运行时已经收敛为单助手对话主链路加异步 PTC 作业。模型直接负责对话；当需要机械执行时，则通过 `<PTC_TOOL_CALLING>` 把工作下推为后台 Python 作业，完成后再由运行时把结果回注到同一会话。
 
 ### 程序化工具调用（PTC）
 
-Zerda 现已把 ~~provider-level tools~~ 与 ~~MCP~~ 路径统一迁移为程序化工具调用（PTC）。执行能力通过 `<PTC_TOOL_CALLING>` 下推为异步 Python 作业，脚本、日志、结果和状态文件全部落盘为工件，由运行时回注结果而不是依赖 provider 原生工具调用。
+Zerda 现已把 ~~provider-level tools~~ 与 ~~MCP~~ 路径统一迁移为程序化工具调用（PTC）。PTC 的核心是“模型写协议块，宿主执行作业”，而不是依赖 provider 原生工具回调。执行结果会以本地工件形式保留，便于回查、复现和恢复。
 
-PTC 不再只是“执行某个工具”的薄封装。对于复杂原语，PTC 还允许原语自身暴露 `get_workflow` 这类渐进式文档入口：模型先读取该原语返回的工作流 Markdown，再进入实际操作阶段。这样一来，过去由 Skills 承担的“先看指导，再开始工作”的链路，可以逐步迁移为原语本地携带的工作说明，而不用重新引入独立的 Skills 子系统。
+PTC 的发现入口也已经统一：模型先看 `<PTC_AVALIABLE_PRIMITIVES>` 中当前可用的顶层原语名，再通过 `help("name")` 查询参数与返回结构；部分复杂原语还会额外提供 `get_workflow`，用于先读工作说明、再开始操作。
 
 ### 预写原语层（Code Primitives）
 
-在 PTC 之上，Zerda 提供“预写原语”层：把高频、易错、可复用的环境交互封装为 Python 异步函数，并在执行时注入给模型直接调用。原语负责参数校验、错误分类、超时控制和遥测落盘；任务级逻辑则由 PTC 作业组合这些原语完成。
+在 PTC 之上，Zerda 提供“预写原语”层：把高频、易错、可复用的环境交互封装为 Python 异步函数，由 PTC 作业按需组合调用。
+
+当前原语分成两层：core primitives 直接在当前 PTC Python 进程执行；custom primitives 按 package 维护独立隔离环境，并在运行时通过薄代理执行。这样既保留统一的 PTC 调用面，又把 custom 依赖与主运行时隔离开。
 
 这意味着原语现在承担两类职责：
 
 1. 执行职责：真正访问文件系统、进程、网络或浏览器
 2. 指导职责：通过 `get_workflow` 提供与该原语强绑定的渐进式使用说明
 
-这种设计把执行能力与工作指导都收拢到同一个注册原语中，使文档版本、参数契约和实际行为保持同步，也让复杂能力可以按“查看 workflow -> 开始调用”的方式稳定工作。
+这种设计把执行能力与工作指导都收拢到同一个注册原语中，使文档版本、参数契约和实际行为保持同步；同时，core 与 custom 两层又通过同一套 PTC 协议暴露给模型。
 
 ### 本地状态与上下文压缩
 

@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::config;
+use crate::ptc::custom_packages;
 
 const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
 const PRIMITIVES_ROOT: &str = "code_primitives/python";
@@ -70,15 +71,24 @@ impl PrimitiveIndex {
 
         let custom_root = cwd.join("custom_primitives");
         if custom_root.exists() {
-            let registered = parse_registered_primitives(&custom_root.join("catalog.py"))?;
-            collect_registered_files(
-                &custom_root,
-                true,
-                &registered,
-                &mut items,
-                &disabled,
-                PrimitiveSource::Custom,
-            )?;
+            for primitive in custom_packages::ready_runtime_primitives(&cwd, disabled_primitives)? {
+                let name = primitive.name;
+                items.push(PrimitiveMetadata {
+                    name: name.clone(),
+                    source: PrimitiveSource::Custom,
+                    path: primitive.source_path,
+                    signature: primitive.call_shape,
+                    summary: primitive.summary,
+                    args: primitive.args,
+                    output_contract: primitive.returns,
+                    when_not_to_use: primitive.when_not_to_use,
+                    common_mistakes: primitive.common_mistakes,
+                    requires: primitive.requirements,
+                    enabled: true,
+                    disabled_reason: None,
+                    tags: build_tags(&name, PrimitiveSource::Custom),
+                });
+            }
         }
 
         items.sort_by(|a, b| a.name.cmp(&b.name));

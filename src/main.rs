@@ -47,6 +47,10 @@ enum Commands {
         resume: Option<Option<String>>,
     },
     Serve,
+    Primitives {
+        #[command(subcommand)]
+        action: PrimitiveAction,
+    },
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -57,6 +61,12 @@ enum Commands {
 enum ConfigAction {
     Generate,
     Validate,
+}
+
+#[derive(Subcommand)]
+enum PrimitiveAction {
+    Sync,
+    Doctor,
 }
 
 fn init_optional_provider<T: ?Sized + 'static>(
@@ -76,9 +86,74 @@ fn init_optional_provider<T: ?Sized + 'static>(
     }
 }
 
+async fn run_custom_primitive_action(action: &PrimitiveAction) -> Result<()> {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match action {
+        PrimitiveAction::Sync => {
+            let reports = ptc::custom_packages::sync_custom_packages(&working_dir).await?;
+            if reports.is_empty() {
+                println!("No custom primitive packages found.");
+                return Ok(());
+            }
+            let mut failed = false;
+            for report in reports {
+                println!(
+                    "{} [{}] {}",
+                    report.package_name,
+                    match report.status {
+                        ptc::custom_packages::CustomPackageSyncStatus::PendingSync => {
+                            "pending_sync"
+                        }
+                        ptc::custom_packages::CustomPackageSyncStatus::Ready => "ready",
+                        ptc::custom_packages::CustomPackageSyncStatus::Failed => {
+                            failed = true;
+                            "failed"
+                        }
+                    },
+                    report.message
+                );
+            }
+            if failed {
+                std::process::exit(1);
+            }
+        }
+        PrimitiveAction::Doctor => {
+            let packages = ptc::custom_packages::scan_custom_packages(&working_dir)?;
+            if packages.is_empty() {
+                println!("No custom primitive packages found.");
+                return Ok(());
+            }
+            let mut failed = false;
+            for package in packages {
+                let status = ptc::custom_packages::package_runtime_status(&package);
+                if !status.is_ready() {
+                    failed = true;
+                }
+                println!(
+                    "{} [{}] {}",
+                    package.project_name,
+                    status.status_name(),
+                    status.python_executable().map_or_else(
+                        || status.message().to_string(),
+                        |path| format!("{} ({})", path.display(), status.message()),
+                    ),
+                );
+            }
+            if failed {
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Primitives { action }) = &cli.command {
+        return run_custom_primitive_action(action).await;
+    }
 
     if let Some(Commands::Config { action }) = &cli.command {
         match action {
@@ -100,6 +175,26 @@ async fn main() -> Result<()> {
     }
 
     let cfg = config::load_config(cli.config.as_deref())?;
+
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match ptc::custom_packages::sync_custom_packages(&working_dir).await {
+        Ok(reports) => {
+            for report in reports {
+                if matches!(
+                    report.status,
+                    ptc::custom_packages::CustomPackageSyncStatus::Failed
+                ) {
+                    eprintln!(
+                        "[custom-primitives] {} failed: {}",
+                        report.package_name, report.message
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("[custom-primitives] sync failed: {error}");
+        }
+    }
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let level = &cfg.log.level;
@@ -337,6 +432,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve) => {
             runner::run_serve(&run_ctx, &mut hot, &sessions_dir).await?;
         }
+        Some(Commands::Primitives { .. }) => unreachable!(),
         Some(Commands::Config { .. }) => unreachable!(),
         None => {
             runner::run_interactive(&mut agent, &run_ctx, &mut hot, &sessions_dir).await?;

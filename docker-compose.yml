@@ -3,7 +3,6 @@ services:
     image: ghcr.io/mgrsc/zerda:latest
     pull_policy: always
     init: true
-    entrypoint: ["/bin/bash", "/root/.zerda/custom_primitives/run_zerda_with_deps.sh"]
     command: ["serve"]
     hostname: e-desert
     working_dir: /root/.zerda

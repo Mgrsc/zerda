@@ -1,0 +1,10 @@
+[project]
+name = "zerda-custom-smart-search"
+version = "0.1.0"
+
+[tool.zerda]
+
+[[tool.zerda.exports]]
+name = "smart_search"
+module = "custom_primitives.smart_search.search"
+callable = "smart_search"

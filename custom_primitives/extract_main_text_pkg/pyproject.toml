@@ -1,0 +1,10 @@
+[project]
+name = "zerda-custom-extract-main-text"
+version = "0.1.0"
+
+[tool.zerda]
+
+[[tool.zerda.exports]]
+name = "extract_main_text_from_html"
+module = "custom_primitives.extract_main_text_from_html"
+callable = "extract_main_text_from_html"

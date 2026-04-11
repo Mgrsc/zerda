@@ -79,13 +79,25 @@ def _inject() -> None:
     disabled.update(_parse_disabled(os.environ.get("PTC_DISABLED_PRIMITIVES", "")))
     try:
         from primitives.catalog import get_primitive_registry
-        from custom_primitives.catalog import (
-            get_primitive_registry as get_custom_primitive_registry,
-        )
 
         registry = {}
         registry.update(get_primitive_registry(disabled_primitives=disabled))
-        registry.update(get_custom_primitive_registry(disabled_primitives=disabled))
+        raw_custom = os.environ.get("PTC_CUSTOM_PRIMITIVES_JSON", "").strip()
+        if raw_custom:
+            try:
+                parsed = json.loads(raw_custom)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name", "")).strip()
+                    if not name or name in disabled:
+                        continue
+                    builtins_item = getattr(builtins, name, None)
+                    if builtins_item is not None:
+                        registry[name] = builtins_item
     except Exception:
         return
     for name, primitive in registry.items():

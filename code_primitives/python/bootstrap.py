@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
 import inspect
 import json
@@ -57,6 +58,8 @@ disabled_primitives = _parse_disabled_primitives(
 NAMESPACE_RULES = {
     "agent_browser": "agent_browser_",
 }
+CUSTOM_PRIMITIVES_ENV = "PTC_CUSTOM_PRIMITIVES_JSON"
+CUSTOM_RUNNER_ENV = "PTC_CUSTOM_RUNNER_PATH"
 
 
 def write_ptc_result(payload):
@@ -224,6 +227,150 @@ def _describe_callable(name: str, fn, *, workflow_entry: str | None = None) -> d
     return data
 
 
+def _load_custom_primitives() -> dict[str, dict]:
+    raw = os.environ.get(CUSTOM_PRIMITIVES_ENV, "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, list):
+        return {}
+    result: dict[str, dict] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        result[name] = item
+    return result
+
+
+def _custom_proxy_doc(entry: dict) -> str:
+    sections = [
+        f"[What it does]\n{str(entry.get('summary', '')).strip()}",
+        f"[Args]\n{str(entry.get('args', '')).strip()}",
+        f"[Output Contract]\n{str(entry.get('returns', '')).strip()}",
+        f"[When NOT to use]\n{str(entry.get('when_not_to_use', '')).strip()}",
+        f"[Common Mistakes]\n{str(entry.get('common_mistakes', '')).strip()}",
+    ]
+    return "\n\n".join(sections).strip()
+
+
+def _append_runner_stderr(text: str) -> None:
+    if not text.strip():
+        return
+    out_path_raw = os.environ.get("PTC_LOG_PATH", "").strip()
+    out_path = Path(out_path_raw) if out_path_raw else Path("log.txt")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("a", encoding="utf-8") as handle:
+        handle.write(text)
+        if not text.endswith("\n"):
+            handle.write("\n")
+
+
+def _custom_proxy_error(status: str, code: str, message: str) -> dict:
+    return {
+        "status": status,
+        "data": {},
+        "error_code": code,
+        "error_message": message,
+        "retryable": False,
+    }
+
+
+def _build_custom_proxy(entry: dict):
+    runner_path = str(os.environ.get(CUSTOM_RUNNER_ENV, "")).strip()
+    python_executable = str(entry.get("python_executable", "")).strip()
+    module_name = str(entry.get("module", "")).strip()
+    callable_name = str(entry.get("callable", "")).strip()
+    primitive_name = str(entry.get("name", "")).strip()
+
+    async def _proxy(*args, **kwargs):
+        if not runner_path:
+            return _custom_proxy_error(
+                "internal_error",
+                "invoke_failed.custom_runner_missing",
+                "custom primitive runner path is missing from the PTC runtime",
+            )
+        if not python_executable:
+            return _custom_proxy_error(
+                "dependency_missing",
+                "not_ready.missing_interpreter",
+                f"custom primitive {primitive_name} is missing its isolated interpreter",
+            )
+        payload = json.dumps(
+            {
+                "args": list(args),
+                "kwargs": kwargs,
+            },
+            ensure_ascii=False,
+        )
+        process = await asyncio.create_subprocess_exec(
+            python_executable,
+            runner_path,
+            module_name,
+            callable_name,
+            payload,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=os.environ.get("PTC_WORKING_DIR") or None,
+            env=dict(os.environ),
+        )
+        stdout, stderr = await process.communicate()
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        if stderr_text.strip():
+            _append_runner_stderr(stderr_text)
+        if process.returncode != 0:
+            return _custom_proxy_error(
+                "internal_error",
+                "invoke_failed.runner_exit",
+                f"custom primitive {primitive_name} failed with exit code {process.returncode}",
+            )
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        if not stdout_text:
+            return _custom_proxy_error(
+                "internal_error",
+                "invoke_failed.empty_output",
+                f"custom primitive {primitive_name} produced no output",
+            )
+        try:
+            return json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            return _custom_proxy_error(
+                "internal_error",
+                "invoke_failed.invalid_output",
+                f"custom primitive {primitive_name} returned invalid JSON: {exc}",
+            )
+
+    _proxy.__name__ = primitive_name or "_custom_proxy"
+    _proxy.__doc__ = _custom_proxy_doc(entry)
+    return _proxy
+
+
+def _describe_custom_callable(name: str, entry: dict) -> dict:
+    return {
+        "name": name,
+        "kind": "primitive",
+        "summary": str(entry.get("summary", "")).strip() or name,
+        "call_shape": str(entry.get("call_shape", "")).strip() or name,
+        "parameters": [],
+        "required_parameters": [],
+        "defaults": {},
+        "args": str(entry.get("args", "")).strip(),
+        "returns": str(entry.get("returns", "")).strip(),
+        "when_not_to_use": str(entry.get("when_not_to_use", "")).strip(),
+        "common_mistakes": str(entry.get("common_mistakes", "")).strip(),
+        "requirements": list(entry.get("requirements", []))
+        if isinstance(entry.get("requirements"), list)
+        else [],
+        "workflow_available": False,
+        "workflow_entry": None,
+    }
+
+
 class _NamespaceProxy:
     def __init__(self, name: str, methods: dict[str, object], legacy_callable=None):
         self._name = name
@@ -302,13 +449,12 @@ def _all_help_targets(top_level: dict[str, object], namespaces: dict[str, dict[s
 try:
     from primitives.catalog import get_primitive_registry
     from primitives.types import ActionStatus, PrimitiveResult
-    from custom_primitives.catalog import (
-        get_primitive_registry as get_custom_primitive_registry,
-    )
 
     registry = {}
     registry.update(get_primitive_registry(disabled_primitives=disabled_primitives))
-    registry.update(get_custom_primitive_registry(disabled_primitives=disabled_primitives))
+    custom_entries = _load_custom_primitives()
+    for name, entry in custom_entries.items():
+        registry[name] = _build_custom_proxy(entry)
     top_level, namespaces = _build_public_surface(registry)
     public_names = _public_names(top_level, namespaces)
     help_targets = _all_help_targets(top_level, namespaces)
@@ -395,6 +541,12 @@ try:
                     retryable=False,
                 ).to_public_dict()
         if value in top_level:
+            if value in custom_entries:
+                return PrimitiveResult(
+                    status=ActionStatus.OK,
+                    data=_describe_custom_callable(value, custom_entries[value]),
+                    retryable=False,
+                ).to_public_dict()
             return PrimitiveResult(
                 status=ActionStatus.OK,
                 data=_describe_callable(value, top_level[value]),

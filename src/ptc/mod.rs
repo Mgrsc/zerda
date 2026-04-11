@@ -1,3 +1,4 @@
+pub mod custom_packages;
 pub mod job_manager;
 pub mod parser;
 pub mod primitive_index;

@@ -1,0 +1,157 @@
+[project]
+name = "zerda-custom-agent-browser"
+version = "0.1.0"
+
+[tool.zerda]
+optional = true
+external-commands = ["agent-browser"]
+
+[[tool.zerda.exports]]
+name = "agent_browser_check"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_check"
+
+[[tool.zerda.exports]]
+name = "agent_browser_click"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_click"
+
+[[tool.zerda.exports]]
+name = "agent_browser_close"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_close"
+
+[[tool.zerda.exports]]
+name = "agent_browser_connect_cdp"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_connect_cdp"
+
+[[tool.zerda.exports]]
+name = "agent_browser_double_click"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_double_click"
+
+[[tool.zerda.exports]]
+name = "agent_browser_fill"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_fill"
+
+[[tool.zerda.exports]]
+name = "agent_browser_focus"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_focus"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_attr"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_attr"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_html"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_html"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_text"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_text"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_title"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_title"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_url"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_url"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_value"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_value"
+
+[[tool.zerda.exports]]
+name = "agent_browser_get_workflow"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_get_workflow"
+
+[[tool.zerda.exports]]
+name = "agent_browser_hover"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_hover"
+
+[[tool.zerda.exports]]
+name = "agent_browser_open"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_open"
+
+[[tool.zerda.exports]]
+name = "agent_browser_press"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_press"
+
+[[tool.zerda.exports]]
+name = "agent_browser_scroll"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_scroll"
+
+[[tool.zerda.exports]]
+name = "agent_browser_scroll_into_view"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_scroll_into_view"
+
+[[tool.zerda.exports]]
+name = "agent_browser_select"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_select"
+
+[[tool.zerda.exports]]
+name = "agent_browser_sleep"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_sleep"
+
+[[tool.zerda.exports]]
+name = "agent_browser_snapshot"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_snapshot"
+
+[[tool.zerda.exports]]
+name = "agent_browser_screenshot"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_screenshot"
+
+[[tool.zerda.exports]]
+name = "agent_browser_type"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_type"
+
+[[tool.zerda.exports]]
+name = "agent_browser_uncheck"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_uncheck"
+
+[[tool.zerda.exports]]
+name = "agent_browser_wait_for_js"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_wait_for_js"
+
+[[tool.zerda.exports]]
+name = "agent_browser_wait_for_load"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_wait_for_load"
+
+[[tool.zerda.exports]]
+name = "agent_browser_wait_for_selector"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_wait_for_selector"
+
+[[tool.zerda.exports]]
+name = "agent_browser_wait_for_text"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_wait_for_text"
+
+[[tool.zerda.exports]]
+name = "agent_browser_wait_for_url"
+module = "custom_primitives.agent_browser.api"
+callable = "agent_browser_wait_for_url"

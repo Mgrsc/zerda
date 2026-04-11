@@ -1,0 +1,10 @@
+[project]
+name = "zerda-custom-firecrawl"
+version = "0.1.0"
+
+[tool.zerda]
+
+[[tool.zerda.exports]]
+name = "firecrawl_search_web"
+module = "custom_primitives.firecrawl.search_web"
+callable = "firecrawl_search_web"

@@ -15,12 +15,15 @@ use uuid::Uuid;
 use crate::channels::{ChannelMessage, ChannelMessageOrigin};
 use crate::config;
 use crate::providers::{ChatOptions, ConversationMessage, Provider};
+use crate::ptc::custom_packages;
 use crate::ptc::parser::{PtcRequest, PtcRequestKind};
 
 const PTC_JOB_DIR: &str = "~/.zerda/ptc_jobs";
 const PRIMITIVES_ROOT_ENV: &str = "ZERDA_PRIMITIVES_ROOT";
 const PTC_PYTHON_ENV: &str = "ZERDA_PTC_PYTHON";
 const PTC_PRIMITIVE_TIMEOUT_ENV: &str = "PTC_PRIMITIVE_TIMEOUT_SECS";
+const PTC_CUSTOM_PRIMITIVES_ENV: &str = "PTC_CUSTOM_PRIMITIVES_JSON";
+const PTC_CUSTOM_RUNNER_ENV: &str = "PTC_CUSTOM_RUNNER_PATH";
 const DEFAULT_PTC_PYTHON: &str = "/opt/zerda-python/bin/python";
 const PRIMITIVES_ROOT: &str = "code_primitives/python";
 const DEFAULT_SYSTEM_PRIMITIVES_ROOT: &str = "/usr/local/share/zerda/code_primitives/python";
@@ -86,6 +89,7 @@ pub struct JobManager {
     working_dir: PathBuf,
     primitives_py_roots: Vec<PathBuf>,
     bootstrap_path: Option<PathBuf>,
+    custom_runner_path: Option<PathBuf>,
     disabled_primitives: Vec<String>,
     compression_provider: (Arc<dyn Provider>, ChatOptions),
 }
@@ -104,6 +108,10 @@ impl JobManager {
             let candidate = path.join("bootstrap.py");
             candidate.exists().then_some(candidate)
         });
+        let custom_runner_path = primitives_py_roots.iter().find_map(|path| {
+            let candidate = path.join("custom_runner.py");
+            candidate.exists().then_some(candidate)
+        });
         Self {
             inner: Arc::new(RwLock::new(std::collections::HashMap::new())),
             tx,
@@ -112,6 +120,7 @@ impl JobManager {
             working_dir,
             primitives_py_roots,
             bootstrap_path,
+            custom_runner_path,
             disabled_primitives,
             compression_provider,
         }
@@ -278,6 +287,7 @@ impl JobManager {
             session,
             &self.working_dir,
             &self.primitives_py_roots,
+            self.custom_runner_path.as_ref(),
             &self.disabled_primitives,
             self.primitive_timeout_secs,
         );
@@ -446,7 +456,7 @@ async fn build_runtime_message(
     compression_provider: &(Arc<dyn Provider>, ChatOptions),
     job: &PtcJobSummary,
 ) -> ChannelMessage {
-    let result_content = std::fs::read_to_string(&job.out_path).unwrap_or_default();
+    let result_content = load_runtime_result(job);
     let inline_result = prepare_inline_result(compression_provider, job, &result_content).await;
     let status = match job.status {
         PtcJobStatus::Succeeded => "ok",
@@ -486,6 +496,71 @@ async fn build_runtime_message(
         origin: ChannelMessageOrigin::RuntimePtcResult,
         related_job_id: Some(job.job_id.clone()),
     }
+}
+
+fn load_runtime_result(job: &PtcJobSummary) -> String {
+    let result_content = std::fs::read_to_string(&job.out_path).unwrap_or_default();
+    if !result_content.trim().is_empty() {
+        return result_content;
+    }
+    if !matches!(
+        job.status,
+        PtcJobStatus::Failed | PtcJobStatus::TimedOut | PtcJobStatus::Cancelled
+    ) {
+        return result_content;
+    }
+
+    let (status, error_code, retryable) = match job.status {
+        PtcJobStatus::TimedOut => ("timeout", "invoke_failed.timeout_without_result", true),
+        PtcJobStatus::Cancelled => (
+            "internal_error",
+            "invoke_failed.cancelled_without_result",
+            false,
+        ),
+        PtcJobStatus::Failed => ("internal_error", "invoke_failed.no_result", false),
+        _ => ("internal_error", "invoke_failed.no_result", false),
+    };
+    let log_excerpt = read_log_excerpt(&job.log_path, 12);
+    let mut error_message = format!(
+        "PTC job {} finished with status {} before writing a structured result",
+        job.job_id,
+        job_status_name(&job.status)
+    );
+    if let Some(code) = job.exit_code {
+        error_message.push_str(&format!(", exit code {code}"));
+    }
+    if let Some(excerpt) = &log_excerpt {
+        let first_line = excerpt.lines().next().unwrap_or_default().trim();
+        if !first_line.is_empty() {
+            error_message.push_str(&format!("; log excerpt: {first_line}"));
+        }
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "status": status,
+        "data": {
+            "job_status": job_status_name(&job.status),
+            "log_path": job.log_path.display().to_string(),
+            "log_excerpt": log_excerpt,
+        },
+        "error_code": error_code,
+        "error_message": error_message,
+        "retryable": retryable,
+    }))
+    .unwrap_or_default()
+}
+
+fn read_log_excerpt(path: &Path, max_lines: usize) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    Some(lines[start..].join("\n"))
 }
 
 async fn prepare_inline_result(
@@ -660,13 +735,26 @@ fn build_bootstrapped_code(
         lines.push("    return locals().get(\"result\")".to_string());
     }
     lines.push(String::new());
-    lines.push("__zerda_ptc_return = asyncio.run(__zerda_ptc_main__())".to_string());
+    lines.push("try:".to_string());
+    lines.push("    __zerda_ptc_return = asyncio.run(__zerda_ptc_main__())".to_string());
     lines.push(
-        "__zerda_existing_result = read_ptc_result() if \"read_ptc_result\" in globals() else None"
+        "    __zerda_existing_result = read_ptc_result() if \"read_ptc_result\" in globals() else None"
             .to_string(),
     );
-    lines.push("if __zerda_existing_result is None:".to_string());
-    lines.push("    write_ptc_result(__zerda_ptc_return)".to_string());
+    lines.push("    if __zerda_existing_result is None:".to_string());
+    lines.push("        write_ptc_result(__zerda_ptc_return)".to_string());
+    lines.push("except Exception as __zerda_ptc_exc:".to_string());
+    lines.push("    if \"write_ptc_result\" in globals():".to_string());
+    lines.push("        write_ptc_result({".to_string());
+    lines.push("            \"status\": \"internal_error\",".to_string());
+    lines.push("            \"data\": {},".to_string());
+    lines.push("            \"error_code\": \"invoke_failed.script_exception\",".to_string());
+    lines.push(
+        "            \"error_message\": f\"PTC script crashed before completion: {type(__zerda_ptc_exc).__name__}: {__zerda_ptc_exc}\",".to_string(),
+    );
+    lines.push("            \"retryable\": False,".to_string());
+    lines.push("        })".to_string());
+    lines.push("    raise".to_string());
     lines.join("\n")
 }
 
@@ -794,6 +882,7 @@ fn build_python_runtime_env(
     session: &PtcSessionContext,
     working_dir: &Path,
     primitives_py_roots: &[PathBuf],
+    custom_runner_path: Option<&PathBuf>,
     disabled_primitives: &[String],
     primitive_timeout_secs: u64,
 ) -> std::collections::BTreeMap<String, String> {
@@ -832,10 +921,24 @@ fn build_python_runtime_env(
         PTC_PRIMITIVE_TIMEOUT_ENV.to_string(),
         primitive_timeout_secs.to_string(),
     );
+    if let Ok(custom_primitives) =
+        custom_packages::ready_runtime_primitives(working_dir, disabled_primitives)
+    {
+        env.insert(
+            PTC_CUSTOM_PRIMITIVES_ENV.to_string(),
+            serde_json::to_string(&custom_primitives).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
     if let Some(root) = primitives_py_roots.first() {
         env.insert(
             "PTC_PRIMITIVES_PY_ROOT".to_string(),
             root.display().to_string(),
+        );
+    }
+    if let Some(path) = custom_runner_path {
+        env.insert(
+            PTC_CUSTOM_RUNNER_ENV.to_string(),
+            path.display().to_string(),
         );
     }
     env
@@ -997,6 +1100,41 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
+    #[test]
+    fn load_runtime_result_falls_back_to_failure_payload_when_out_is_missing() {
+        let root = make_temp_dir();
+        let mut job = test_job_summary(&root);
+        job.status = PtcJobStatus::Failed;
+        job.exit_code = Some(1);
+        std::fs::write(
+            &job.log_path,
+            "Traceback (most recent call last):\nRuntimeError: boom\n",
+        )
+        .expect("write log");
+
+        let inline_result = load_runtime_result(&job);
+
+        assert!(inline_result.contains("\"error_code\": \"invoke_failed.no_result\""));
+        assert!(inline_result.contains("RuntimeError: boom"));
+        assert!(inline_result.contains(&job.log_path.display().to_string()));
+        std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn build_bootstrapped_code_writes_structured_result_before_reraising() {
+        let code = build_bootstrapped_code(
+            "raise RuntimeError('boom')",
+            None,
+            Path::new("/tmp/out.json"),
+            Path::new("/tmp/log.txt"),
+            Path::new("/tmp/telemetry.jsonl"),
+        );
+
+        assert!(code.contains("except Exception as __zerda_ptc_exc:"));
+        assert!(code.contains("\"error_code\": \"invoke_failed.script_exception\""));
+        assert!(code.contains("write_ptc_result({"));
+    }
+
     #[tokio::test]
     async fn falls_back_to_raw_result_when_compression_fails_within_emergency_cap() {
         let root = make_temp_dir();
@@ -1069,6 +1207,7 @@ mod tests {
             &session,
             &working_dir,
             &[PathBuf::from("/tmp/primitives")],
+            None,
             &["shell".to_string()],
             45,
         );

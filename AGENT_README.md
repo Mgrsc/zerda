@@ -29,8 +29,8 @@ Zerda is a single-assistant runtime.
 | Assistant core | `src/agent.rs` | One-turn provider call, compaction, PTC extraction | history, system prompt, provider response | visible assistant text, parsed PTC requests, parse notices | provider trait, fast model sidecar | malformed hidden payload becomes runtime notice | one prompt in CLI | inspect saved session JSON |
 | PTC parser | `src/ptc/parser.rs` | Parse exact `<PTC_TOOL_CALLING>` payloads | hidden XML payload | `Vec<PtcRequest>` | regex | malformed payload becomes runtime notice | feed sample XML | inspect runtime notice text |
 | PTC stream interceptor | `src/ptc/stream_interceptor.rs` | Hide hidden PTC XML after first tag | streaming text deltas | visible text + hidden XML | none | partial malformed tag can leak only if provider never completes it | streamed PTC reply | inspect hidden payload handling |
-| Primitive index | `src/ptc/primitive_index.rs` | Scan internal primitive files plus custom primitive registrations, parse callable metadata, and build prompt-visible public primitive listings | primitive files, `custom_primitives/catalog.py`, disabled list | indexed primitive metadata and available public names | filesystem, regex | prompt-visible primitive list can degrade to empty | inspect prompt output and primitive paths | inspect primitive paths and metadata |
-| PTC job manager | `src/ptc/job_manager.rs` | Launch detached Python jobs, track status, compress oversized inline results, inject completion | parsed requests, session context | artifacts, status files, runtime result messages | `python3`, filesystem, primitives roots, primitive index, fast-model sidecar | start failures become notices; timeout becomes timed_out result | `/jobs`, `/job <id>` | inspect `~/.zerda/ptc_jobs/*` |
+| Primitive index | `src/ptc/primitive_index.rs`, `src/ptc/custom_packages.rs` | Scan internal primitive files plus ready custom package manifests, parse callable metadata, and build prompt-visible public primitive listings | primitive files, custom package manifests, sync state, disabled list | indexed primitive metadata and available public names | filesystem, regex, sync state | prompt-visible primitive list can degrade to empty | inspect prompt output and primitive paths | inspect primitive paths, manifests, and sync state |
+| PTC job manager | `src/ptc/job_manager.rs` | Launch detached Python jobs, track status, compress oversized inline results, inject completion | parsed requests, session context | artifacts, status files, runtime result messages | `python3`, filesystem, primitives roots, custom package registry, fast-model sidecar | start failures become notices; timeout becomes timed_out result | `/jobs`, `/job <id>` | inspect `~/.zerda/ptc_jobs/*` |
 | Provider adapters | `src/providers/*` | Chat and stream integration for supported APIs | history, model options | `ProviderResponse` or stream events | provider HTTP APIs | request errors bubble up to runner | send one prompt | inspect provider logs |
 | Channel adapters | `src/channels/*` | CLI, Telegram, and gateway-backed WeChat transport | stdin, Telegram updates, or WeChat gateway events | `ChannelMessage` and outbound replies | terminal, Telegram API, or WeChat gateway HTTP API; optional STT | init/send failures logged | local CLI, Telegram message, or WeChat message | inspect channel logs |
 | EMA memory runtime | `src/memory/*` | Recall active personal/operational memory, journal completed turns, extract structured memories, consolidate insights, decay stale entries | memory config, completed turn content, fast-model sidecar | recalled prompt blocks, SQLite state, Chroma active index | rusqlite, reqwest, filesystem, fast model provider | warns and degrades gracefully when recall or maintenance fails | inspect SQLite file and logs | inspect memory recall/maintenance logs |
@@ -47,6 +47,8 @@ Zerda is a single-assistant runtime.
 | `zerda run -m "<text>"` | one-shot turn | one assistant response and optional detached PTC jobs | exits on fatal startup/provider error | compare stdout and artifacts | inspect stderr and job files |
 | `zerda run --resume [id]` | resume saved session | continued session history | returns error if session missing or corrupt | resume latest session | inspect `~/.zerda/sessions/*.json` |
 | `zerda serve` | start configured channels | long-running listeners | bails if no channels configured | start service and send message | inspect channel logs |
+| `zerda primitives sync` | sync isolated custom primitive environments | per-package sync status lines | exits `1` when any package fails to sync | run after editing a custom package manifest | inspect sync stderr and package state files |
+| `zerda primitives doctor` | inspect custom primitive readiness | per-package readiness lines | exits `1` when any package is not ready | compare with prompt-visible custom names | inspect package state files and external command availability |
 | `zerda config generate` | print full template | `zerda.toml.full` to stdout | none expected | compare output to template | inspect stdout |
 | `zerda config validate` | validate config | success text or field error | exits `1` on invalid config | run before deployment | inspect reported field |
 
@@ -105,6 +107,8 @@ Runtime-injected environment variables:
 - `PTC_PRIMITIVES_PY_ROOT`
 - `PTC_PRIMITIVES_PY_ROOTS`
 - `PTC_DISABLED_PRIMITIVES`
+- `PTC_CUSTOM_PRIMITIVES_JSON`
+- `PTC_CUSTOM_RUNNER_PATH`
 
 PTC artifact notes:
 
@@ -127,10 +131,10 @@ Deployment note:
 
 Custom primitive registration:
 
-- `custom_primitives/catalog.py` is the registration point and source of truth for exposed custom primitives.
-- `code_primitives/python/primitives/catalog.py` is the registration point and source of truth for exposed built-in primitives.
-- Custom implementation files may be grouped into subpackages such as `custom_primitives/agent_browser/`, `custom_primitives/firecrawl/`, and `custom_primitives/smart_search/`.
-- Prompt-visible primitives are included only if they are registered in their source catalog.
+- Each custom package is declared by `custom_primitives/*/pyproject.toml`.
+- The manifest lists exported callable names plus per-package dependency requirements.
+- Custom implementation files may still be grouped into subpackages such as `custom_primitives/agent_browser/`, `custom_primitives/firecrawl/`, and `custom_primitives/smart_search/`.
+- Prompt-visible custom primitives are included only after their package sync state is `ready`.
 
 Prompt exposure policy:
 
@@ -143,8 +147,8 @@ Prompt exposure policy:
 - Web routing is: `firecrawl_search_web` for URL discovery, `smart_search` for answer-style retrieval against a configured OpenAI-compatible `chat/completions` endpoint, Scrapling primitives for page fetching, and `agent_browser` for interactive validation and test flows.
 - `scrapling_fetch_page` routes `mp.weixin.qq.com` article URLs to a WeChat-specific extractor and `x.com` / `twitter.com` URLs to the stealth fetch path, where tweet-body container extraction is preferred over full-page text.
 - `scrapling_fetch_page` also performs one automatic static-to-stealth retry for selected dynamic-content domains when the static result looks like a shell page or lacks usable body text.
-- `scrapling_fetch_page` depends on `scrapling[fetchers]` and `playwright` in the unified PTC Python runtime; otherwise it returns `dependency_missing`.
-- `scrapling_fetch_page` may internally switch to a stealth browser-backed path for selected dynamic domains; `run_zerda_with_deps.sh` installs Chromium automatically when `playwright` is declared in custom primitive requirements.
+- `scrapling_fetch_page` is backed by its own custom package environment with `scrapling[fetchers]`, `playwright`, and Chromium browser installation.
+- `agent_browser` is backed by its own custom package environment and remains hidden until its external `agent-browser` command requirement is satisfied.
 - Optional docstring metadata still helps indexing and maintenance, but primary discoverability no longer depends on a separate search-first flow.
 
 ## Configuration Reference
@@ -206,8 +210,9 @@ Prompt exposure policy:
 | `SMART_SEARCH_API_KEY` | string | no | unset | `smart_search` custom primitive | answer-style retrieval primitive authentication fails |
 | `SMART_SEARCH_MODEL` | string | no | unset | `smart_search` custom primitive | answer-style retrieval primitive cannot build a valid request |
 | `AGENT_BROWSER_EXECUTABLE_PATH` | path | no | unset | external `agent-browser` runtime, when supported by the host installation | browser primitives may fail to launch the intended executable |
-| `ZERDA_PTC_PYTHON` | path | no | `/opt/zerda-python/bin/python` | unified Python runtime for PTC jobs and custom primitive dependency installation; the bundled image creates it with `uv venv --python 3.13` | PTC jobs or custom primitive runtime bootstrap fail if it points to the wrong interpreter |
+| `ZERDA_PTC_PYTHON` | path | no | `/opt/zerda-python/bin/python` | base Python runtime for PTC jobs and custom primitive package environment creation; the bundled image creates it with `uv venv --python 3.13` | PTC jobs or custom package sync fail if it points to the wrong interpreter |
 | `ZERDA_PRIMITIVES_ROOT` | path | no | auto-discovery | primitive bootstrap | primitives may not load |
+| `ZERDA_CUSTOM_PRIMITIVES_CACHE_DIR` | path | no | `~/.zerda/custom_primitives` | isolated custom package environment cache root | custom package sync state or virtualenv lookup breaks |
 
 Repository-maintained config template:
 
@@ -219,9 +224,10 @@ Repository-maintained config template:
 
 Runtime dependency note:
 
-- `scrapling_fetch_page` does not use an environment variable, but it does require `scrapling[fetchers]` and `playwright` in the unified PTC Python runtime referenced by `ZERDA_PTC_PYTHON`. If those dependencies are absent, the primitive returns `dependency_missing`.
-- `run_zerda_with_deps.sh` installs Chromium automatically before Zerda startup when `playwright` is declared in merged custom primitive requirements.
-- The repository Dockerfile provisions the same unified runtime at `/opt/zerda-python/bin/python` via `uv venv --python 3.13` and preinstalls `scrapling[fetchers]`, `playwright`, and Chromium there for locally built images.
+- Core PTC jobs still use the base runtime referenced by `ZERDA_PTC_PYTHON`.
+- Custom primitive packages are synced into isolated virtual environments under `ZERDA_CUSTOM_PRIMITIVES_CACHE_DIR` or `~/.zerda/custom_primitives/packages/`.
+- `scrapling_fetch_page` is backed by its own synced package environment with `scrapling[fetchers]`, `playwright`, and Chromium browser installation.
+- The repository Dockerfile still provisions the base runtime at `/opt/zerda-python/bin/python` via `uv venv --python 3.13`.
   - runtime default resolution still targets `~/.zerda/zerda.toml`
   - typical bare-metal deployment copies `zerda.toml.full` to that runtime path
 

@@ -1,0 +1,26 @@
+[project]
+name = "zerda-custom-divination"
+version = "0.1.0"
+dependencies = ["sxtwl==2.0.7"]
+
+[tool.zerda]
+
+[[tool.zerda.exports]]
+name = "calculate_meihua"
+module = "custom_primitives.divination.primitive"
+callable = "calculate_meihua"
+
+[[tool.zerda.exports]]
+name = "convert_lunar_to_solar"
+module = "custom_primitives.divination.primitive"
+callable = "convert_lunar_to_solar"
+
+[[tool.zerda.exports]]
+name = "get_lunar_info"
+module = "custom_primitives.divination.primitive"
+callable = "get_lunar_info"
+
+[[tool.zerda.exports]]
+name = "get_sizhu_info"
+module = "custom_primitives.divination.primitive"
+callable = "get_sizhu_info"

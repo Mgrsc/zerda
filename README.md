@@ -96,6 +96,7 @@ Zerda expands `${VAR}` in TOML from the process environment.
 - WeChat integration goes through [`wechat-agent-gateway`](https://github.com/Mgrsc/wechat-agent-gateway), not the WeChat protocol directly.
 - EMA memory requires a reachable Chroma instance. The bundled Compose stack uses `http://chroma:8000`.
 - `ZERDA_PRIMITIVES_ROOT` is only needed if you want to override the default primitive discovery path.
+- Custom primitive package environments are synced automatically during startup. Use `zerda primitives sync` for explicit maintenance.
 
 ---
 
@@ -109,6 +110,8 @@ Zerda provides a command-line interface with both interactive and service modes:
 | `zerda run -m "<message>"` | Execute a single prompt and exit. |
 | `zerda run --resume [session_id]` | Resume the latest session or a specific saved session. |
 | `zerda serve` | Start background services such as Telegram Bot or WeChat channel listeners. |
+| `zerda primitives sync` | Sync isolated environments for custom primitive packages. |
+| `zerda primitives doctor` | Show readiness for custom primitive packages. |
 | `zerda config generate` | Print the full config template (`zerda.toml.full`). |
 | `zerda config validate` | Validate the effective config and exit. |
 
@@ -142,7 +145,30 @@ Busy-session behavior:
 <details>
 <summary><b>Expand Technical Design</b></summary>
 
-The current runtime keeps the same core ideas described in the Chinese README: KV-cache-friendly prompts, a single assistant dialogue loop with asynchronous PTC jobs, compiler-pattern delegation, prewritten Python primitives, local recoverable state, and EMA memory with structured extraction plus active recall.
+### Current Runtime
+
+The runtime is a single-assistant dialogue loop plus asynchronous PTC jobs. The model handles dialogue directly. When mechanical work is needed, it emits `<PTC_TOOL_CALLING>` blocks, which the host executes as detached Python jobs and later reinjects into the same session as runtime results.
+
+### Programmatic Tool Calling
+
+PTC replaces both provider-level tool calling and MCP. The execution model is protocol-driven rather than provider-driven: the model writes `<PTC_TOOL_CALLING>`, and the host executes it as a bounded Python job. Execution artifacts are kept locally for inspection and recovery.
+
+Runtime discovery is unified too: the model first inspects `<PTC_AVALIABLE_PRIMITIVES>`, then uses `help("name")` to learn parameter shapes and return contracts. Some complex primitives may additionally expose `get_workflow` for setup-sensitive or multi-step guidance.
+
+### Code Primitives
+
+On top of PTC, Zerda provides prewritten async Python primitives for common environment interactions. These primitives handle validation, error classification, hard timeouts, and telemetry, while PTC jobs compose them into task-level execution.
+
+The primitive layer has two sources:
+
+1. Core primitives in `code_primitives/python/primitives/`, executed directly inside the current PTC Python process.
+2. Custom primitives in `custom_primitives/`, executed through package-isolated environments behind the same PTC surface.
+
+This keeps one visible protocol surface for the model while separating custom-package dependencies from the main runtime.
+
+### Local Recoverable State
+
+The current runtime keeps local recoverable state for sessions, compaction artifacts, PTC artifacts, and EMA memory. This preserves replayability and troubleshooting without depending on provider-native tool history.
 
 For implementation-level operational details, see [AGENT_README.md](./AGENT_README.md).
 
