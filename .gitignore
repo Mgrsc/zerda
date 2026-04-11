@@ -15,6 +15,9 @@ dev-file/
 __pycache__/
 *.py[cod]
 telemetry.jsonl
+.venv/
+venv/
+custom_primitives/packages/
 custom_primitives/install.log
 custom_primitives/install.state
 custom_primitives/python-request.txt

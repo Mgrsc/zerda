@@ -40,7 +40,7 @@ from .divination import (
     get_lunar_info,
     get_sizhu_info,
 )
-from .extract_main_text_from_html import extract_main_text_from_html
+from .extract_main_text import extract_main_text_from_html
 from .firecrawl import firecrawl_search_web
 from .scrapling import scrapling_fetch_page
 from .smart_search import smart_search
